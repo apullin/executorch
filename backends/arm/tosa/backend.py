@@ -232,6 +232,7 @@ class TOSABackend(BackendDetails):
         tosa_graph: ts.TosaSerializer,
         debug_hook: DebugHook | None,
         submodule_name: str | None = None,
+        containing_graph_module: GraphModule | None = None,
     ):
         """Convert 'graph_module' to a tosa_graph"""
         tosa_spec = compile_spec.tosa_spec
@@ -266,7 +267,13 @@ class TOSABackend(BackendDetails):
                 elif node.op == "placeholder":
                     if len(node.users) == 0:
                         continue
-                    process_placeholder(node, tosa_graph, edge_program, tosa_spec)
+                    process_placeholder(
+                        node,
+                        tosa_graph,
+                        edge_program,
+                        containing_graph_module,
+                        tosa_spec,
+                    )
                 elif node.op == "output":
                     process_output(node, tosa_graph, tosa_spec)
                 elif node.op == "get_attr":
@@ -299,6 +306,7 @@ class TOSABackend(BackendDetails):
                 tosa_graph,
                 debug_hook,
                 submodule_name=name,
+                containing_graph_module=graph_module,
             )
 
     @staticmethod
