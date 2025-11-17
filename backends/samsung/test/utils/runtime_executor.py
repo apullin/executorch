@@ -72,7 +72,7 @@ class EDBTestManager:
         self._edb(["-E", f"'mkdir -p {self.work_directory}'"])
         self._edb(["-U", self.pte_file, self.work_directory])
         self._edb(["-U", self.runner, self.work_directory])
-        self._edb(["-E", f"'ls {self.work_directory}'"])  # temp
+        self._edb(["-E", f"'ls -al {self.work_directory}'"])  # temp
 
         for input_file in self.input_files:
             input_file_path = os.path.join(self.artifacts_dir, input_file)
@@ -87,6 +87,7 @@ class EDBTestManager:
     def execute(self):
         self._edb(["-E", f"'rm -rf {self.output_folder}'"])
         self._edb(["-E", f"'mkdir -p {self.output_folder}'"])
+        self._edb(["-E", f"'chmod 777 {self.output_folder}'"])
         # run the delegation
         input_files_list = " ".join([os.path.basename(x) for x in self.input_files])
         enn_executor_runner_args = " ".join(
@@ -107,6 +108,8 @@ class EDBTestManager:
         self._edb(["-E", f"{enn_executor_runner_cmd}"])
 
     def pull(self, output_path):
+        self._edb(["-E", f"'ls -al {self.output_folder}'"])
+        print(f"ls -al {output_path}")
         self._edb(["-D", self.output_folder, output_path])
 
 
@@ -125,8 +128,8 @@ class RuntimeExecutor:
             )
             test_manager.push()
             test_manager.execute()
+
             host_output_save_dir = os.path.join(tmp_dir, "output")
-            os.makedirs(host_output_save_dir, exist_ok=True)
             test_manager.pull(host_output_save_dir)
 
             model_outputs = self._get_model_outputs()
