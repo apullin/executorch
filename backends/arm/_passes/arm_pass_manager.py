@@ -57,6 +57,7 @@ from executorch.backends.arm._passes import (
     DecomposeGluPass,
     DecomposeGroupedConvPass,
     DecomposeGroupNormPass,
+    DecomposeGruPass,
     DecomposeIndexSelectToGatherPass,
     DecomposeIntPowPass,
     DecomposeLayerNormPass,
@@ -229,6 +230,7 @@ class ArmPassManager(PassManager):
         # Node transformation passes (pre q/dq folding)
         self.add_passes(
             [
+                DecomposeGruPass(),
                 FuseQuantizedActivationPass(),
                 RewriteBoolBitwiseNotToLogicalNotPass(),
                 RewriteBoolToFp32CastViaInt8Pass(),
@@ -394,6 +396,7 @@ class ArmPassManager(PassManager):
         # Transformation passes (pre scalar -> tensor)
         self.add_passes(
             [
+                DecomposeGruPass(tfa_pass=True),
                 DecomposeSelectScatterPass(tfa_pass=True),
                 ConvertInt64ConstOpsToInt32Pass(tfa_pass=True),
                 ConvertInt64OutputOpsToInt32Pass(tfa_pass=True),
