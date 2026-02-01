@@ -4,7 +4,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import operator
-from typing import Set, Type
+from typing import List, Set, Tuple, Type
 
 import torch
 from executorch.backends.arm._passes.arm_pass import ArmPass
@@ -26,12 +26,148 @@ class DecomposeGruPass(ArmPass):
     result is sliced into r/z/n components. This yields 2 mm ops per timestep
     instead of 6.
 
-    Supports multi-layer, with/without bias, and batch_first.
+    Supports multi-layer, bidirectional, with/without bias, and batch_first.
     """
 
     _passes_required_after: Set[Type[ExportPass]] = {InsertTableOpsPass}
 
     _TARGET = torch.ops.aten.gru.input
+
+    # Ops — always aten since GRU has no edge dialect variant
+    _mm = torch.ops.aten.mm.default
+    _t = torch.ops.aten.t.default
+    _add = torch.ops.aten.add.Tensor
+    _sub = torch.ops.aten.sub.Tensor
+    _mul = torch.ops.aten.mul.Tensor
+    _sigmoid = torch.ops.aten.sigmoid.default
+    _tanh = torch.ops.aten.tanh.default
+    _slice = torch.ops.aten.slice_copy.Tensor
+    _unsqueeze = torch.ops.aten.unsqueeze.default
+    _cat = torch.ops.aten.cat.default
+    _select = torch.ops.aten.select_copy.int
+
+    def _build_direction(
+        self,
+        graph: torch.fx.Graph,
+        node: torch.fx.Node,
+        current_input: torch.fx.Node,
+        h_prev: torch.fx.Node,
+        weight_ih: torch.fx.Node,
+        weight_hh: torch.fx.Node,
+        bias_ih,
+        bias_hh,
+        hidden_size: int,
+        seq_len: int,
+        time_dim: int,
+        reverse: bool,
+    ) -> Tuple[List[torch.fx.Node], torch.fx.Node]:
+        """Build GRU cell computation for one direction.
+
+        Returns (timestep_outputs, h_final) where timestep_outputs are
+        unsqueezed hidden states in forward time order.
+        """
+        w_ih_t = create_node(graph, self._t, args=(weight_ih,), from_node=node)
+        w_hh_t = create_node(graph, self._t, args=(weight_hh,), from_node=node)
+
+        time_indices = range(seq_len - 1, -1, -1) if reverse else range(seq_len)
+        timestep_outputs = []
+
+        for t_idx in time_indices:
+            x_t = create_node(
+                graph,
+                self._select,
+                args=(current_input, time_dim, t_idx),
+                from_node=node,
+            )
+
+            gates_x = create_node(
+                graph, self._mm, args=(x_t, w_ih_t), from_node=node
+            )
+            gates_h = create_node(
+                graph, self._mm, args=(h_prev, w_hh_t), from_node=node
+            )
+
+            if bias_ih is not None:
+                gates_x = create_node(
+                    graph, self._add, args=(gates_x, bias_ih), from_node=node
+                )
+            if bias_hh is not None:
+                gates_h = create_node(
+                    graph, self._add, args=(gates_h, bias_hh), from_node=node
+                )
+
+            H = hidden_size
+            r_x = create_node(
+                graph, self._slice, args=(gates_x, 1, 0, H), from_node=node
+            )
+            z_x = create_node(
+                graph, self._slice, args=(gates_x, 1, H, 2 * H), from_node=node
+            )
+            n_x = create_node(
+                graph,
+                self._slice,
+                args=(gates_x, 1, 2 * H, 3 * H),
+                from_node=node,
+            )
+            r_h = create_node(
+                graph, self._slice, args=(gates_h, 1, 0, H), from_node=node
+            )
+            z_h = create_node(
+                graph, self._slice, args=(gates_h, 1, H, 2 * H), from_node=node
+            )
+            n_h = create_node(
+                graph,
+                self._slice,
+                args=(gates_h, 1, 2 * H, 3 * H),
+                from_node=node,
+            )
+
+            r_pre = create_node(
+                graph, self._add, args=(r_x, r_h), from_node=node
+            )
+            r_t = create_node(
+                graph, self._sigmoid, args=(r_pre,), from_node=node
+            )
+
+            z_pre = create_node(
+                graph, self._add, args=(z_x, z_h), from_node=node
+            )
+            z_t = create_node(
+                graph, self._sigmoid, args=(z_pre,), from_node=node
+            )
+
+            r_n_h = create_node(
+                graph, self._mul, args=(r_t, n_h), from_node=node
+            )
+            n_pre = create_node(
+                graph, self._add, args=(n_x, r_n_h), from_node=node
+            )
+            n_t = create_node(
+                graph, self._tanh, args=(n_pre,), from_node=node
+            )
+
+            diff = create_node(
+                graph, self._sub, args=(h_prev, n_t), from_node=node
+            )
+            z_diff = create_node(
+                graph, self._mul, args=(z_t, diff), from_node=node
+            )
+            h_t = create_node(
+                graph, self._add, args=(n_t, z_diff), from_node=node
+            )
+            h_prev = h_t
+
+            h_t_expanded = create_node(
+                graph, self._unsqueeze, args=(h_t, time_dim), from_node=node
+            )
+            timestep_outputs.append(h_t_expanded)
+
+        # Backward outputs were appended in reverse time order; flip to
+        # forward order so they align with the forward direction for concat.
+        if reverse:
+            timestep_outputs.reverse()
+
+        return timestep_outputs, h_prev
 
     def call(self, graph_module: torch.fx.GraphModule):
         graph = graph_module.graph
@@ -55,10 +191,6 @@ class DecomposeGruPass(ArmPass):
             bidirectional = args[7]
             batch_first = args[8]
 
-            if bidirectional:
-                # Bidirectional not yet supported; leave node for fallback.
-                continue
-
             input_val = input_node.meta["val"]
             hx_val = hx_node.meta["val"]
 
@@ -70,203 +202,141 @@ class DecomposeGruPass(ArmPass):
                 time_dim = 0
 
             hidden_size = hx_val.shape[-1]
-            step = 4 if has_biases else 2
-
-            # Ops namespace — always aten since GRU has no edge dialect variant
-            mm_op = torch.ops.aten.mm.default
-            t_op = torch.ops.aten.t.default
-            add_op = torch.ops.aten.add.Tensor
-            sub_op = torch.ops.aten.sub.Tensor
-            mul_op = torch.ops.aten.mul.Tensor
-            sigmoid_op = torch.ops.aten.sigmoid.default
-            tanh_op = torch.ops.aten.tanh.default
-            slice_op = torch.ops.aten.slice_copy.Tensor
-            unsqueeze_op = torch.ops.aten.unsqueeze.default
-            cat_op = torch.ops.aten.cat.default
-            select_op = torch.ops.aten.select_copy.int
+            num_directions = 2 if bidirectional else 1
+            # Params per layer: (w_ih, w_hh[, b_ih, b_hh]) * num_directions
+            dir_step = 4 if has_biases else 2
+            layer_step = dir_step * num_directions
 
             with graph.inserting_before(node):
                 current_input = input_node
                 layer_final_hiddens = []
 
                 for layer_idx in range(num_layers):
-                    offset = layer_idx * step
-                    weight_ih = params[offset]
-                    weight_hh = params[offset + 1]
-                    bias_ih = params[offset + 2] if has_biases else None
-                    bias_hh = params[offset + 3] if has_biases else None
+                    layer_offset = layer_idx * layer_step
 
-                    # Initial hidden state for this layer: hx[layer_idx]
-                    h_prev = create_node(
+                    # Forward direction
+                    fw_off = layer_offset
+                    fw_w_ih = params[fw_off]
+                    fw_w_hh = params[fw_off + 1]
+                    fw_b_ih = params[fw_off + 2] if has_biases else None
+                    fw_b_hh = params[fw_off + 3] if has_biases else None
+
+                    fw_h0 = create_node(
                         graph,
-                        select_op,
-                        args=(hx_node, 0, layer_idx),
+                        self._select,
+                        args=(hx_node, 0, num_directions * layer_idx),
                         from_node=node,
                     )
 
-                    # Transpose weights once outside the timestep loop
-                    w_ih_t = create_node(
-                        graph, t_op, args=(weight_ih,), from_node=node
-                    )
-                    w_hh_t = create_node(
-                        graph, t_op, args=(weight_hh,), from_node=node
-                    )
-
-                    timestep_outputs = []
-
-                    for t_idx in range(seq_len):
-                        # Extract x_t: select along time dimension
-                        x_t = create_node(
-                            graph,
-                            select_op,
-                            args=(current_input, time_dim, t_idx),
-                            from_node=node,
-                        )
-
-                        # Batched gate computation: 2 mm ops instead of 6
-                        # gates_x: [batch, 3*H], gates_h: [batch, 3*H]
-                        gates_x = create_node(
-                            graph, mm_op, args=(x_t, w_ih_t), from_node=node
-                        )
-                        gates_h = create_node(
-                            graph, mm_op, args=(h_prev, w_hh_t), from_node=node
-                        )
-
-                        if bias_ih is not None:
-                            gates_x = create_node(
-                                graph,
-                                add_op,
-                                args=(gates_x, bias_ih),
-                                from_node=node,
-                            )
-                        if bias_hh is not None:
-                            gates_h = create_node(
-                                graph,
-                                add_op,
-                                args=(gates_h, bias_hh),
-                                from_node=node,
-                            )
-
-                        # Slice gates into r, z, n components
-                        H = hidden_size
-                        r_x = create_node(
-                            graph,
-                            slice_op,
-                            args=(gates_x, 1, 0, H),
-                            from_node=node,
-                        )
-                        z_x = create_node(
-                            graph,
-                            slice_op,
-                            args=(gates_x, 1, H, 2 * H),
-                            from_node=node,
-                        )
-                        n_x = create_node(
-                            graph,
-                            slice_op,
-                            args=(gates_x, 1, 2 * H, 3 * H),
-                            from_node=node,
-                        )
-
-                        r_h = create_node(
-                            graph,
-                            slice_op,
-                            args=(gates_h, 1, 0, H),
-                            from_node=node,
-                        )
-                        z_h = create_node(
-                            graph,
-                            slice_op,
-                            args=(gates_h, 1, H, 2 * H),
-                            from_node=node,
-                        )
-                        n_h = create_node(
-                            graph,
-                            slice_op,
-                            args=(gates_h, 1, 2 * H, 3 * H),
-                            from_node=node,
-                        )
-
-                        # Reset gate: r = sigmoid(r_x + r_h)
-                        r_pre = create_node(
-                            graph, add_op, args=(r_x, r_h), from_node=node
-                        )
-                        r_t = create_node(
-                            graph, sigmoid_op, args=(r_pre,), from_node=node
-                        )
-
-                        # Update gate: z = sigmoid(z_x + z_h)
-                        z_pre = create_node(
-                            graph, add_op, args=(z_x, z_h), from_node=node
-                        )
-                        z_t = create_node(
-                            graph, sigmoid_op, args=(z_pre,), from_node=node
-                        )
-
-                        # New gate: n = tanh(n_x + r * n_h)
-                        r_n_h = create_node(
-                            graph, mul_op, args=(r_t, n_h), from_node=node
-                        )
-                        n_pre = create_node(
-                            graph, add_op, args=(n_x, r_n_h), from_node=node
-                        )
-                        n_t = create_node(
-                            graph, tanh_op, args=(n_pre,), from_node=node
-                        )
-
-                        # Hidden state: h_t = n_t + z_t * (h_prev - n_t)
-                        diff = create_node(
-                            graph, sub_op, args=(h_prev, n_t), from_node=node
-                        )
-                        z_diff = create_node(
-                            graph, mul_op, args=(z_t, diff), from_node=node
-                        )
-                        h_t = create_node(
-                            graph, add_op, args=(n_t, z_diff), from_node=node
-                        )
-
-                        h_prev = h_t
-
-                        # Unsqueeze for concatenation along time dim
-                        h_t_expanded = create_node(
-                            graph,
-                            unsqueeze_op,
-                            args=(h_t, time_dim),
-                            from_node=node,
-                        )
-                        timestep_outputs.append(h_t_expanded)
-
-                    # Concatenate timestep outputs into layer output
-                    layer_output = create_node(
+                    fw_outputs, fw_h_final = self._build_direction(
                         graph,
-                        cat_op,
-                        args=(timestep_outputs, time_dim),
-                        from_node=node,
+                        node,
+                        current_input,
+                        fw_h0,
+                        fw_w_ih,
+                        fw_w_hh,
+                        fw_b_ih,
+                        fw_b_hh,
+                        hidden_size,
+                        seq_len,
+                        time_dim,
+                        reverse=False,
                     )
+
+                    if bidirectional:
+                        bw_off = layer_offset + dir_step
+                        bw_w_ih = params[bw_off]
+                        bw_w_hh = params[bw_off + 1]
+                        bw_b_ih = params[bw_off + 2] if has_biases else None
+                        bw_b_hh = params[bw_off + 3] if has_biases else None
+
+                        bw_h0 = create_node(
+                            graph,
+                            self._select,
+                            args=(hx_node, 0, 2 * layer_idx + 1),
+                            from_node=node,
+                        )
+
+                        bw_outputs, bw_h_final = self._build_direction(
+                            graph,
+                            node,
+                            current_input,
+                            bw_h0,
+                            bw_w_ih,
+                            bw_w_hh,
+                            bw_b_ih,
+                            bw_b_hh,
+                            hidden_size,
+                            seq_len,
+                            time_dim,
+                            reverse=True,
+                        )
+
+                        # Concatenate fw + bw at each timestep along feature dim
+                        merged = []
+                        for fw_out, bw_out in zip(fw_outputs, bw_outputs):
+                            merged.append(
+                                create_node(
+                                    graph,
+                                    self._cat,
+                                    args=([fw_out, bw_out], -1),
+                                    from_node=node,
+                                )
+                            )
+
+                        layer_output = create_node(
+                            graph,
+                            self._cat,
+                            args=(merged, time_dim),
+                            from_node=node,
+                        )
+
+                        layer_final_hiddens.append(
+                            create_node(
+                                graph,
+                                self._unsqueeze,
+                                args=(fw_h_final, 0),
+                                from_node=node,
+                            )
+                        )
+                        layer_final_hiddens.append(
+                            create_node(
+                                graph,
+                                self._unsqueeze,
+                                args=(bw_h_final, 0),
+                                from_node=node,
+                            )
+                        )
+                    else:
+                        layer_output = create_node(
+                            graph,
+                            self._cat,
+                            args=(fw_outputs, time_dim),
+                            from_node=node,
+                        )
+
+                        layer_final_hiddens.append(
+                            create_node(
+                                graph,
+                                self._unsqueeze,
+                                args=(fw_h_final, 0),
+                                from_node=node,
+                            )
+                        )
 
                     current_input = layer_output
 
-                    # Unsqueeze final hidden for stacking across layers
-                    h_final_expanded = create_node(
-                        graph,
-                        unsqueeze_op,
-                        args=(h_prev, 0),
-                        from_node=node,
-                    )
-                    layer_final_hiddens.append(h_final_expanded)
-
-                # Build h_n: [num_layers, batch, hidden_size]
-                if num_layers == 1:
+                # Build h_n
+                if len(layer_final_hiddens) == 1:
                     h_n = layer_final_hiddens[0]
                 else:
                     h_n = create_node(
                         graph,
-                        cat_op,
+                        self._cat,
                         args=(layer_final_hiddens, 0),
                         from_node=node,
                     )
 
-                # Output is the sequence output of the last layer
                 output_node = current_input
 
             # Replace getitem users: GRU returns (output, h_n)
