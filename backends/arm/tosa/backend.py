@@ -347,11 +347,16 @@ class TOSABackend(BackendDetails):
 
         node_visitors = get_node_visitors(edge_program, tosa_spec, debug_hook)
 
+        # _sort_outputs is intentionally disabled: it reorders the TOSA
+        # flatbuffer outputs but the runner reads output shapes from
+        # original_module (a pre-preprocess copy), creating a mismatch.
+        # The TOSA reference model preserves flatbuffer order, so no
+        # sorting is needed.
         if output_order_workaround:
-            logger.debug("Re-sorting outputs during TOSA lowering.")
-            graph_module = _sort_outputs(graph_module, node_to_id_map)
-        else:
-            logger.debug("No re-sorting outputs (workaround) during TOSA lowering.")
+            logger.debug(
+                "output_order_workaround is set but _sort_outputs is "
+                "disabled — see MLETORCH-1266."
+            )
 
         if submodule_name is not None:
             tosa_graph.startRegion(submodule_name)
