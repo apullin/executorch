@@ -58,6 +58,7 @@ from executorch.backends.arm._passes import (
     DecomposeGroupedConvPass,
     DecomposeGroupNormPass,
     DecomposeGruPass,
+    DecomposeLstmPass,
     DecomposeRnnPass,
     DecomposeIndexSelectToGatherPass,
     DecomposeIntPowPass,
@@ -232,6 +233,7 @@ class ArmPassManager(PassManager):
         self.add_passes(
             [
                 DecomposeGruPass(),
+                DecomposeLstmPass(),
                 DecomposeRnnPass(),
                 FuseQuantizedActivationPass(),
                 RewriteBoolBitwiseNotToLogicalNotPass(),
@@ -399,6 +401,7 @@ class ArmPassManager(PassManager):
         self.add_passes(
             [
                 DecomposeGruPass(tfa_pass=True),
+                DecomposeLstmPass(tfa_pass=True),
                 DecomposeRnnPass(tfa_pass=True),
                 DecomposeSelectScatterPass(tfa_pass=True),
                 ConvertInt64ConstOpsToInt32Pass(tfa_pass=True),
