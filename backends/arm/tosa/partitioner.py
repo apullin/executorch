@@ -28,6 +28,7 @@ from executorch.backends.arm._passes.convert_expand_copy_to_repeat import (
 
 from executorch.backends.arm.common.type import ensure_type
 from executorch.backends.arm.constants import DQ_OPS, Q_OPS
+from executorch.backends.arm.operator_support.target_normalization import target_key
 from executorch.backends.arm.operator_support.tosa_supported_operators import (
     tosa_support_factory,
 )
@@ -77,7 +78,11 @@ def _is_noop_expand(node: torch.fx.node.Node) -> bool:
 
 
 def _is_view_copy(node: torch.fx.node.Node) -> bool:
-    return node.target == exir_ops.edge.aten.view_copy.default
+    return target_key(node.target) in {
+        target_key(exir_ops.edge.aten.view_copy.default),
+        target_key(torch.ops.aten.reshape.default),
+        target_key(torch.ops.aten.flatten.using_ints),
+    }
 
 
 def is_partitioned(
