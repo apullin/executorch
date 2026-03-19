@@ -7,13 +7,26 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Callable, Dict, List, Mapping, NamedTuple, Optional, Tuple, Union
+from typing import (
+    Callable,
+    Dict,
+    List,
+    Mapping,
+    NamedTuple,
+    Optional,
+    Tuple,
+    TYPE_CHECKING,
+    Union,
+)
 
 import torch
 
 from executorch.exir.backend.backend_details import enforcedmethod
 from executorch.exir.backend.compile_spec_schema import CompileSpec
 from torch.export import ExportedProgram
+
+if TYPE_CHECKING:
+    from executorch.exir.capture import EdgeCompileConfig
 
 
 class DelegationSpec(NamedTuple):
@@ -31,6 +44,16 @@ class PartitionResult:
 
     tagged_exported_program: ExportedProgram
     partition_tags: Dict[str, DelegationSpec]
+
+
+@dataclass
+class DirectLoweringResult:
+    """
+    exported_program: a backend-lowered ExportedProgram that is ready for
+    direct handoff back into ExecuTorch's packaging flow.
+    """
+
+    exported_program: ExportedProgram
 
 
 class Partitioner(ABC):
@@ -112,3 +135,18 @@ class Partitioner(ABC):
             in the list returned by ops_to_not_decompose.
         """
         return ([], None)
+
+    def direct_lower(
+        self,
+        exported_program: ExportedProgram,
+        compile_config: "EdgeCompileConfig",
+    ) -> Optional[DirectLoweringResult]:
+        """
+        Optional experimental fast path for backends that can directly lower an
+        earlier dialect than Edge.
+
+        Returning ``None`` means the partitioner does not support direct
+        lowering for the given program/config and ExecuTorch should use the
+        existing lowering path unchanged.
+        """
+        return None
