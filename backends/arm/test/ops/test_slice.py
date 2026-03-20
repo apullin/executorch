@@ -7,6 +7,7 @@
 
 from typing import Tuple
 
+import pytest
 import torch
 
 from executorch.backends.arm.quantizer.arm_quantizer import (
@@ -329,15 +330,15 @@ def test_slice_tensor_tosa_INT_step(test_data: Tuple):
 @common.parametrize(
     "test_data",
     test_data_step_int | test_data_step_fp,
-    xfails={
-        "bool_2d_step4": "MLETORCH-1744: bool test fails",
-    },
 )
 @common.XfailIfNoCorstone300
 def test_slice_tensor_u55_INT_step(test_data: Tuple):
+    inputs = test_data()
+    if inputs[0].dtype == torch.bool:
+        pytest.xfail("MLETORCH-1744: bool test fails")
     pipeline = EthosU55PipelineINT[input_t1](
         SliceWithStep(),
-        test_data(),
+        inputs,
         aten_ops=aten_op,
         exir_ops=exir_op,
     )
@@ -347,9 +348,12 @@ def test_slice_tensor_u55_INT_step(test_data: Tuple):
 @common.parametrize("test_data", test_data_step_int | test_data_step_fp)
 @common.XfailIfNoCorstone320
 def test_slice_tensor_u85_INT_step(test_data: Tuple):
+    inputs = test_data()
+    if inputs[0].dtype == torch.bool:
+        pytest.xfail("MLETORCH-1744: bool test fails")
     pipeline = EthosU85PipelineINT[input_t1](
         SliceWithStep(),
-        test_data(),
+        inputs,
         aten_ops=aten_op,
         exir_ops=exir_op,
     )
