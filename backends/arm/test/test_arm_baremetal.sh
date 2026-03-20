@@ -105,6 +105,15 @@ test_pytest_ops_tosa() {
     echo "${TEST_SUITE_NAME}: PASS"
 }
 
+test_pytest_ops_tosa_direct_lower() {
+    echo "${TEST_SUITE_NAME}: Run pytest ops for TOSA with direct backend lowering"
+
+    ARM_TEST_ENABLE_DIRECT_BACKEND_LOWERING=1 \
+      pytest --verbose --color=yes --numprocesses=auto --durations=10 \
+      backends/arm/test/ --ignore=backends/arm/test/models -k tosa
+    echo "${TEST_SUITE_NAME}: PASS"
+}
+
 test_pytest_models_tosa() {
     echo "${TEST_SUITE_NAME}: Run pytest models for TOSA"
 
