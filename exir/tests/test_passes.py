@@ -69,6 +69,7 @@ from executorch.exir.passes.normalize_view_copy_base_pass import (
 from executorch.exir.passes.remove_graph_asserts_pass import RemoveGraphAssertsPass
 from executorch.exir.passes.remove_mixed_type_operators import RemoveMixedTypeOperators
 from executorch.exir.passes.replace_edge_with_backend_pass import EdgeToBackendOpsPass
+from executorch.exir.passes.replace_aten_with_edge_pass import OpReplacePass
 from executorch.exir.passes.replace_view_copy_with_view_pass import (
     ReplaceViewCopyWithViewPass,
 )
@@ -1190,6 +1191,18 @@ class TestPasses(unittest.TestCase):
         FileCheck().check("torch.ops.aten.add.Tensor").check(
             "torch.ops.aten.relu.default"
         ).run(gm_retraced.exported_program().graph_module.code)
+
+    def test_op_replace_pass_maps_unbind_to_copy(self) -> None:
+        class UnbindModule(torch.nn.Module):
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                first, second = torch.unbind(x, dim=0)
+                return first + second
+
+        gm = export(UnbindModule(), (torch.randn(2, 3),), strict=True)
+        lowered = OpReplacePass().call(gm.graph_module).graph_module
+
+        FileCheck().check("unbind_copy").run(lowered.code)
+        self.assertNotIn("aten.unbind.int", lowered.code)
 
     def test_debug_handle_generator_pass(self) -> None:
         eager_model = MLP(2, output_size=4)
