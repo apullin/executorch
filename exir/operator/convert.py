@@ -222,7 +222,19 @@ def get_op_overload(qualified_opname: str, overload: str) -> OpOverload:
     ns, opname = parse_qualified_opname(qualified_opname)
     if not overload:
         overload = "default"
-    return getattr(getattr(getattr(torch.ops, ns), opname), overload)
+    packet = getattr(getattr(torch.ops, ns), opname)
+    try:
+        return getattr(packet, overload)
+    except AttributeError:
+        if ns != "quantized_decomposed":
+            raise
+
+        default_op = getattr(packet, "default", None)
+        if default_op is None or not _ensure_quantized_out_variant_registered(default_op):
+            raise
+
+        refreshed_packet = getattr(getattr(torch.ops, ns), opname)
+        return getattr(refreshed_packet, overload)
 
 
 def schema_to_opoverload(schema: FunctionSchema) -> OpOverload:

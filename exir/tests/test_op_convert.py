@@ -10,6 +10,7 @@ import unittest
 
 import torch
 from executorch.exir import EdgeCompileConfig, ExecutorchBackendConfig, to_edge
+from executorch.exir.dialects.edge._ops import ops as exir_ops
 from executorch.exir.operator import convert as op_convert
 from executorch.exir.operator.convert import to_out_variant
 from torch.export import export
@@ -107,6 +108,33 @@ class TestToOutVariant(unittest.TestCase):
             dequantize_out.name(), "quantized_decomposed::dequantize_per_tensor.out"
         )
         self.assertEqual(dequantize_args, ("out",))
+
+    def test_to_out_variant_quantized_decomposed_per_channel_fallback(self) -> None:
+        import torch.ao.quantization.fx._decomposed  # noqa: F401
+
+        quantize_out, quantize_args = op_convert.to_out_variant(
+            torch.ops.quantized_decomposed.quantize_per_channel.default
+        )
+        self.assertEqual(
+            quantize_out.name(), "quantized_decomposed::quantize_per_channel.out"
+        )
+        self.assertEqual(quantize_args, ("out",))
+
+        dequantize_out, dequantize_args = op_convert.to_out_variant(
+            torch.ops.quantized_decomposed.dequantize_per_channel.default
+        )
+        self.assertEqual(
+            dequantize_out.name(),
+            "quantized_decomposed::dequantize_per_channel.out",
+        )
+        self.assertEqual(dequantize_args, ("out",))
+
+        edge_quantize_out = (
+            exir_ops.edge.quantized_decomposed.quantize_per_channel.default.to_out_variant()
+        )
+        self.assertEqual(
+            edge_quantize_out.name(), "quantized_decomposed::quantize_per_channel.out"
+        )
 
     def test_to_executorch_with_quantized_decomposed_ops(self) -> None:
         import torch.ao.quantization.fx._decomposed  # noqa: F401

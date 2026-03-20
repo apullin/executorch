@@ -26,7 +26,22 @@ def get_torch_op_overload(
 ) -> torch._ops.OpOverload:
     packet: OpOverloadPacket = getattr(getattr(torch.ops, namespace), opname)
     if overload:
-        return getattr(packet, overload)
+        try:
+            return getattr(packet, overload)
+        except AttributeError:
+            if namespace != "quantized_decomposed":
+                raise
+
+            default_op = getattr(packet, "default", None)
+            if default_op is None or not _ensure_quantized_out_variant_registered(
+                default_op
+            ):
+                raise
+
+            refreshed_packet: OpOverloadPacket = getattr(
+                getattr(torch.ops, namespace), opname
+            )
+            return getattr(refreshed_packet, overload)
     else:
         return packet.default
 
