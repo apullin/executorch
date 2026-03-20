@@ -1310,7 +1310,14 @@ def _maybe_direct_lower_with_partitioners(
         if direct_result is None:
             return None
         assert isinstance(direct_result, DirectLoweringResult)
-        direct_programs[name] = direct_result.exported_program
+        direct_program = direct_result.exported_program
+        if direct_result.post_lowering_passes:
+            direct_program = _transform(
+                direct_program,
+                *direct_result.post_lowering_passes,
+                override_verifiers=direct_result.override_verifiers,
+            )
+        direct_programs[name] = direct_program
 
     edge_manager = EdgeProgramManager(
         direct_programs,

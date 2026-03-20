@@ -16,6 +16,7 @@ from typing import (
     Optional,
     Tuple,
     TYPE_CHECKING,
+    Type,
     Union,
 )
 
@@ -27,6 +28,8 @@ from torch.export import ExportedProgram
 
 if TYPE_CHECKING:
     from executorch.exir.capture import EdgeCompileConfig
+    from executorch.exir.pass_manager import PassType
+    from torch._export.verifier import Verifier
 
 
 class DelegationSpec(NamedTuple):
@@ -51,9 +54,15 @@ class DirectLoweringResult:
     """
     exported_program: a backend-lowered ExportedProgram that is ready for
     direct handoff back into ExecuTorch's packaging flow.
+    post_lowering_passes: optional legalization passes to run before wrapping
+    the program in an EdgeProgramManager.
+    override_verifiers: optional verifier classes to use while applying the
+    post-lowering passes.
     """
 
     exported_program: ExportedProgram
+    post_lowering_passes: Tuple["PassType", ...] = ()
+    override_verifiers: Optional[List[Type["Verifier"]]] = None
 
 
 class Partitioner(ABC):

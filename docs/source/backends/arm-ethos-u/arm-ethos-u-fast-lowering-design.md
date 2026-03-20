@@ -85,6 +85,8 @@ Example shape:
 @dataclass
 class DirectLoweringResult:
     exported_program: ExportedProgram
+    post_lowering_passes: tuple[PassType, ...] = ()
+    override_verifiers: Optional[list[type[Verifier]]] = None
 
 
 class DirectLoweringPartitioner(Protocol):
@@ -104,6 +106,9 @@ Notes:
   already operates in terms of partitioners, not backend classes.
 - The returned program is expected to be semantically equivalent to the input
   program, but already contain delegated regions.
+- If needed, the result may carry a small post-lowering legalization stack and
+  verifier override for boundary cleanup before the program is wrapped by
+  `EdgeProgramManager`.
 
 ### 2. Gate the fast lane in `to_edge_transform_and_lower(...)`
 
