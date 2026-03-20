@@ -119,7 +119,7 @@ test_pytest_ops_tosa_direct_lower_smoke() {
 
     ARM_TEST_ENABLE_DIRECT_BACKEND_LOWERING=1 \
       pytest --verbose --color=yes --durations=10 --maxfail=1 \
-      backends/arm/test/misc/test_partition_decomposed_quantized_ops.py::test_linear_residaul_tosa_INT \
+      backends/arm/test/misc/test_partition_decomposed_quantized_ops.py::test_linear_residual_tosa_INT \
       backends/arm/test/ops/test_slice.py::test_slice_tensor_16a8w_tosa_INT
     echo "${TEST_SUITE_NAME}: PASS"
 }
