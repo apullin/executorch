@@ -15,7 +15,7 @@ be delegated to the TOSA backend. Use this module to:
 
 import logging
 from itertools import count
-from typing import Callable, List, Optional, Sequence, Tuple
+from typing import Callable, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
 import torch
 from executorch.backends.arm._passes.arm_pass_utils import (
@@ -36,15 +36,22 @@ from executorch.backends.arm.tosa.backend import TOSABackend
 from executorch.backends.arm.tosa.compile_spec import TosaCompileSpec
 from executorch.exir.backend.partitioner import (
     DelegationSpec,
+    DirectLoweringResult,
     Partitioner,
     PartitionResult,
 )
+from executorch.exir.backend.backend_api import to_backend
 from executorch.exir.backend.utils import tag_constant_data, WhyNoPartitionReporter
 from executorch.exir.dialects._ops import ops as exir_ops
+from executorch.exir.passes import OpReplacePass
+from executorch.exir.verification.verifier import EXIREdgeDialectVerifier
 from torch.export.exported_program import ExportedProgram
 from torch.fx import GraphModule
 from torch.fx.passes.infra.partitioner import CapabilityBasedPartitioner, Partition
 from torch.fx.passes.operator_support import OperatorSupportBase
+
+if TYPE_CHECKING:
+    from executorch.exir.capture import EdgeCompileConfig
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +90,13 @@ def _is_view_copy(node: torch.fx.node.Node) -> bool:
         target_key(torch.ops.aten.reshape.default),
         target_key(torch.ops.aten.flatten.using_ints),
     }
+
+
+def _contains_raw_quantized_decomposed_op(program: ExportedProgram) -> bool:
+    for node in program.graph.nodes:
+        if getattr(node.target, "namespace", None) == "quantized_decomposed":
+            return True
+    return False
 
 
 def is_partitioned(
@@ -154,6 +168,38 @@ class TOSAPartitioner(Partitioner):
         )
         self.tosa_spec = compile_spec.tosa_spec
         self.additional_checks = additional_checks
+
+    def direct_lower(
+        self,
+        exported_program: ExportedProgram,
+        compile_config: "EdgeCompileConfig",
+    ) -> Optional[DirectLoweringResult]:
+        """Lower a quantized ATen program directly to a delegated graph.
+
+        This is intentionally conservative:
+        - only integer-capable TOSA targets are considered
+        - only raw quantized-decomposed graphs opt in
+        - the delegated outer graph is legalized back to Edge dialect before
+          ExecuTorch wraps it in an EdgeProgramManager
+        """
+        if not self.tosa_spec.support_integer():
+            return None
+        if not compile_config._use_edge_ops:
+            return None
+        if not _contains_raw_quantized_decomposed_op(exported_program):
+            return None
+
+        direct_program = to_backend(exported_program, self)
+        return DirectLoweringResult(
+            exported_program=direct_program,
+            post_lowering_passes=(OpReplacePass(),),
+            override_verifiers=[
+                EXIREdgeDialectVerifier(
+                    edge_compile_config=compile_config,
+                    class_only=True,
+                )
+            ],
+        )
 
     def _detag_boundary_nodes(
         self, module: GraphModule, tag: str, reporter: WhyNoPartitionReporter
