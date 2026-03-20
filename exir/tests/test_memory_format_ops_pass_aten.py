@@ -126,7 +126,7 @@ class TestMemoryFormatOpsPass(unittest.TestCase):
         )
 
     def test_mobilenet_v3(self) -> None:
-        model = torchvision.models.mobilenetv3.mobilenet_v3_small(pretrained=True)
+        model = torchvision.models.mobilenetv3.mobilenet_v3_small(weights=None)
         MemoryFormatOpsPassTestUtils.memory_format_test_runner(
             self,
             MemoryFormatTestSet(
