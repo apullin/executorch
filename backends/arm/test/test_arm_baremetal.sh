@@ -114,6 +114,16 @@ test_pytest_ops_tosa_direct_lower() {
     echo "${TEST_SUITE_NAME}: PASS"
 }
 
+test_pytest_ops_tosa_direct_lower_smoke() {
+    echo "${TEST_SUITE_NAME}: Run direct-lowering smoke tests for TOSA"
+
+    ARM_TEST_ENABLE_DIRECT_BACKEND_LOWERING=1 \
+      pytest --verbose --color=yes --durations=10 --maxfail=1 \
+      backends/arm/test/misc/test_partition_decomposed_quantized_ops.py::test_linear_residaul_tosa_INT \
+      backends/arm/test/ops/test_slice.py::test_slice_tensor_16a8w_tosa_INT
+    echo "${TEST_SUITE_NAME}: PASS"
+}
+
 test_pytest_models_tosa() {
     echo "${TEST_SUITE_NAME}: Run pytest models for TOSA"
 
