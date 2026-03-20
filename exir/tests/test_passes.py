@@ -436,6 +436,43 @@ class TestPasses(unittest.TestCase):
         self.assertTrue(isinstance(val, (tuple, list)))
         self.assertEqual(1, len(val))
 
+    def test_to_out_variant_handles_edge_op_overload(self) -> None:
+        class Add(torch.nn.Module):
+            def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+                return x + y
+
+        prog = to_edge(
+            export(Add(), (torch.ones(1), torch.zeros(1)), strict=True),
+            compile_config=EdgeCompileConfig(_check_ir_validity=False),
+        ).exported_program()
+        gm = prog.graph_module
+        add_node = next(
+            node
+            for node in gm.graph.nodes
+            if node.op == "call_function" and "aten.add" in str(node.target)
+        )
+        add_node.target = exir_ops.edge.aten.add.Tensor
+        gm.recompile()
+
+        new_gm_res = ToOutVarPass()(gm)
+        self.assertIsNotNone(new_gm_res)
+
+    def test_to_out_variant_skips_conv2d_without_out_variant(self) -> None:
+        class Conv(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.conv = torch.nn.Conv2d(2, 4, kernel_size=3, padding=1)
+
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                return self.conv(x)
+
+        prog = to_edge(
+            export(Conv(), (torch.randn(1, 2, 8, 8),), strict=True),
+            compile_config=EdgeCompileConfig(_check_ir_validity=False),
+        ).exported_program()
+        new_gm_res = ToOutVarPass()(prog.graph_module)
+        self.assertIsNotNone(new_gm_res)
+
     def test_to_out_variant_multiple_out(self) -> None:
         class MyModel(nn.Module):
             def __init__(self):
