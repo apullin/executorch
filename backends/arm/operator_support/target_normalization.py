@@ -8,6 +8,7 @@ _TARGET_ALIASES = {
     "aten::flatten.using_ints": "aten::view_copy.default",
     "aten::permute.default": "aten::permute_copy.default",
     "aten::reshape.default": "aten::view_copy.default",
+    "aten::slice.Tensor": "aten::slice_copy.Tensor",
     "aten::_to_copy.default": "dim_order_ops::_to_dim_order_copy.default",
 }
 

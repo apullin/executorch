@@ -42,6 +42,7 @@ from executorch.exir.backend.partitioner import (
 )
 from executorch.exir.backend.backend_api import to_backend
 from executorch.exir.backend.utils import tag_constant_data, WhyNoPartitionReporter
+from executorch.exir.delegate import executorch_call_delegate
 from executorch.exir.dialects._ops import ops as exir_ops
 from executorch.exir.passes import OpReplacePass
 from executorch.exir.verification.verifier import EXIREdgeDialectVerifier
@@ -95,6 +96,13 @@ def _is_view_copy(node: torch.fx.node.Node) -> bool:
 def _contains_raw_quantized_decomposed_op(program: ExportedProgram) -> bool:
     for node in program.graph.nodes:
         if getattr(node.target, "namespace", None) == "quantized_decomposed":
+            return True
+    return False
+
+
+def _contains_delegate_call(program: ExportedProgram) -> bool:
+    for node in program.graph.nodes:
+        if node.op == "call_function" and node.target == executorch_call_delegate:
             return True
     return False
 
@@ -190,6 +198,8 @@ class TOSAPartitioner(Partitioner):
             return None
 
         direct_program = to_backend(exported_program, self)
+        if not _contains_delegate_call(direct_program):
+            return None
         return DirectLoweringResult(
             exported_program=direct_program,
             post_lowering_passes=(OpReplacePass(),),
