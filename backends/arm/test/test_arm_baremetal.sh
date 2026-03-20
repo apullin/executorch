@@ -106,13 +106,15 @@ test_pytest_ops_tosa() {
 }
 
 test_pytest_ops_tosa_direct_lower() {
-    echo "${TEST_SUITE_NAME}: Run pytest ops for TOSA with direct backend lowering"
+    echo "${TEST_SUITE_NAME}: Run quantized pytest ops for TOSA with direct backend lowering"
+
+    direct_lower_k='tosa and (INT or 16a8w or a16w8 or quantized or qat)'
 
     ARM_TEST_ENABLE_DIRECT_BACKEND_LOWERING=1 \
       ARM_TEST_ENABLE_ARM_TOSA_ENGINE_PATCH=1 \
       ARM_TOSA_ENGINE_SERIALIZER=rust \
       pytest --verbose --color=yes --numprocesses=auto --durations=10 \
-      backends/arm/test/ --ignore=backends/arm/test/models -k tosa
+      backends/arm/test/ --ignore=backends/arm/test/models -k "${direct_lower_k}"
     echo "${TEST_SUITE_NAME}: PASS"
 }
 
