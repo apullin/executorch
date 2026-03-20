@@ -89,19 +89,30 @@ case "${IMAGE_NAME}" in
 esac
 
 TORCH_VERSION=$(cat ci_commit_pins/pytorch.txt)
-BUILD_DOCS=1
+BUILD_DOCS=${BUILD_DOCS:-1}
+SCCACHE_DISABLE=${SCCACHE_DISABLE:-}
+ENABLE_SCCACHE=1
+DOCKER_NO_CACHE=${DOCKER_NO_CACHE:-1}
+
+if [[ -n "${SCCACHE_DISABLE}" && "${SCCACHE_DISABLE}" != "0" ]]; then
+  ENABLE_SCCACHE=0
+fi
 
 # Copy requirements-lintrunner.txt from root to here
 cp ../../requirements-lintrunner.txt ./
 
-# Copy arm setup script from root to here
+# Copy Arm setup content from root to here.
+# Exclude arm-scratch because it contains local build/output state and nested
+# tool checkouts that are not needed for the image build and can carry hostile
+# permissions from previous runs.
 # TODO(huydhn): Figure out a way to rebuild the Docker image automatically
 # with a new image hash when the content here is updated
-cp -r ../../examples/arm/ ./arm
+rm -rf ./arm
+mkdir -p ./arm
+tar -C ../../examples --exclude='arm/arm-scratch' -cf - arm | tar -C . -xf -
 
-docker build \
-  --no-cache \
-  --progress=plain \
+docker_build_args=(
+  --progress=plain
   --build-arg "OS_VERSION=${OS_VERSION}" \
   --build-arg "CLANG_VERSION=${CLANG_VERSION}" \
   --build-arg "GCC_VERSION=${GCC_VERSION}" \
@@ -111,6 +122,8 @@ docker build \
   --build-arg "BUCK2_VERSION=${BUCK2_VERSION}" \
   --build-arg "LINTRUNNER=${LINTRUNNER:-}" \
   --build-arg "BUILD_DOCS=${BUILD_DOCS}" \
+  --build-arg "ENABLE_SCCACHE=${ENABLE_SCCACHE}" \
+  --build-arg "SCCACHE_DISABLE=${SCCACHE_DISABLE}" \
   --build-arg "ARM_SDK=${ARM_SDK:-}" \
   --build-arg "ZEPHYR_SDK=${ZEPHYR_SDK:-}" \
   --build-arg "QNN_SDK=${QNN_SDK:-}" \
@@ -120,5 +133,13 @@ docker build \
   --build-arg "CUDA_WINDOWS_CROSS_COMPILE=${CUDA_WINDOWS_CROSS_COMPILE:-}" \
   --build-arg "CUDA_VERSION=${CUDA_VERSION:-}" \
   -f "${OS}"/Dockerfile \
+)
+
+if [[ "${DOCKER_NO_CACHE}" != "0" ]]; then
+  docker_build_args=(--no-cache "${docker_build_args[@]}")
+fi
+
+docker build \
+  "${docker_build_args[@]}" \
   "$@" \
   .

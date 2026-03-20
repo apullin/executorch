@@ -109,6 +109,8 @@ test_pytest_ops_tosa_direct_lower() {
     echo "${TEST_SUITE_NAME}: Run pytest ops for TOSA with direct backend lowering"
 
     ARM_TEST_ENABLE_DIRECT_BACKEND_LOWERING=1 \
+      ARM_TEST_ENABLE_ARM_TOSA_ENGINE_PATCH=1 \
+      ARM_TOSA_ENGINE_SERIALIZER=rust \
       pytest --verbose --color=yes --numprocesses=auto --durations=10 \
       backends/arm/test/ --ignore=backends/arm/test/models -k tosa
     echo "${TEST_SUITE_NAME}: PASS"
@@ -118,6 +120,8 @@ test_pytest_ops_tosa_direct_lower_smoke() {
     echo "${TEST_SUITE_NAME}: Run direct-lowering smoke tests for TOSA"
 
     ARM_TEST_ENABLE_DIRECT_BACKEND_LOWERING=1 \
+      ARM_TEST_ENABLE_ARM_TOSA_ENGINE_PATCH=1 \
+      ARM_TOSA_ENGINE_SERIALIZER=rust \
       pytest --verbose --color=yes --durations=10 --maxfail=1 \
       backends/arm/test/misc/test_partition_decomposed_quantized_ops.py::test_linear_residual_tosa_INT \
       backends/arm/test/ops/test_slice.py::test_slice_tensor_16a8w_tosa_INT

@@ -27,6 +27,35 @@ def pytest_configure(config):
 
     logging.basicConfig(stream=sys.stdout)
 
+    if os.environ.get("ARM_TEST_ENABLE_ARM_TOSA_ENGINE_PATCH", "0") in (
+        "",
+        "0",
+        "false",
+        "False",
+    ):
+        return
+
+    engine_root = os.environ.get("ARM_TOSA_ENGINE_ROOT")
+    if engine_root and engine_root not in sys.path:
+        sys.path.insert(0, engine_root)
+
+    executorch_src_root = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "..", "src")
+    )
+    if executorch_src_root not in sys.path:
+        sys.path.insert(0, executorch_src_root)
+
+    try:
+        from fast_preprocess import patch_tosa_backend
+    except ImportError as exc:
+        raise RuntimeError(
+            "ARM test lane requested arm-tosa-engine patching, but fast_preprocess "
+            "could not be imported. Set ARM_TOSA_ENGINE_ROOT and install the "
+            "arm-tosa-engine package in the active environment."
+        ) from exc
+
+    patch_tosa_backend()
+
 
 def pytest_collection_modifyitems(config, items):
     pass
