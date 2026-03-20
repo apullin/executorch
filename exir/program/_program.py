@@ -1287,7 +1287,7 @@ def _maybe_direct_lower_with_partitioners(
     config: EdgeCompileConfig,
     constant_methods: Optional[Dict[str, Any]],
     generate_etrecord: bool = False,
-) -> Optional["EdgeProgramManager"]:
+) -> tuple[Optional["EdgeProgramManager"], Set[str]]:
     """
     Try an experimental direct-lowering fast path.
 
@@ -1298,17 +1298,17 @@ def _maybe_direct_lower_with_partitioners(
     - falls back to the existing path on any non-applicable method
     """
     if not config._enable_direct_backend_lowering:
-        return None
+        return None, set()
 
     direct_programs: Dict[str, ExportedProgram] = {}
     for name, program in aten_programs.items():
         partitioners_for_program = partitioner.get(name, [])
         if len(partitioners_for_program) != 1:
-            return None
+            return None, set()
 
         direct_result = partitioners_for_program[0].direct_lower(program, config)
         if direct_result is None:
-            return None
+            return None, set()
         assert isinstance(direct_result, DirectLoweringResult)
         direct_program = direct_result.exported_program
         if direct_result.post_lowering_passes:
@@ -1331,7 +1331,7 @@ def _maybe_direct_lower_with_partitioners(
         etrecord.add_edge_dialect_program(copy.deepcopy(edge_manager))
         edge_manager._etrecord = etrecord
 
-    return edge_manager
+    return edge_manager, set(direct_programs.keys())
 
 
 def collect_named_data_store_from_exported_program(
@@ -1435,8 +1435,9 @@ def to_edge_transform_and_lower(  # noqa: C901
         partitioner = {name: [] for name in aten_programs.keys()}
 
     edge_manager = None
+    direct_lowered_methods: Set[str] = set()
     if transform_passes is None:
-        edge_manager = _maybe_direct_lower_with_partitioners(
+        edge_manager, direct_lowered_methods = _maybe_direct_lower_with_partitioners(
             partitioner,
             aten_programs,
             config,
@@ -1464,9 +1465,12 @@ def to_edge_transform_and_lower(  # noqa: C901
     for i in range(max_num_partitioners):
         method_to_partitioner = {}
         for name, partitioner_list in partitioner.items():
+            if name in direct_lowered_methods:
+                continue
             if i < len(partitioner_list):
                 method_to_partitioner[name] = partitioner_list[i]
-        edge_manager = edge_manager.to_backend(method_to_partitioner)
+        if method_to_partitioner:
+            edge_manager = edge_manager.to_backend(method_to_partitioner)
 
     for name, program in edge_manager._edge_programs.items():
         ops_set_to_not_decompose: Set[torch._ops.OpOverload] = set()
