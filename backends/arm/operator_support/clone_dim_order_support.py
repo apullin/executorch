@@ -27,7 +27,10 @@ logger = logging.getLogger(__name__)
 class CloneSupported(SupportedTOSAOperatorCheck):
     """Provide TOSA support check for ``_clone_dim_order``."""
 
-    targets = [exir_ops.edge.dim_order_ops._clone_dim_order.default]
+    targets = [
+        exir_ops.edge.dim_order_ops._clone_dim_order.default,
+        torch.ops.aten.clone.default,
+    ]
 
     def is_node_tosa_supported(
         self, node: fx.Node, tosa_spec: TosaSpecification
