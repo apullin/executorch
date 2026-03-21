@@ -44,7 +44,12 @@ from executorch.exir.backend.backend_api import to_backend
 from executorch.exir.backend.utils import tag_constant_data, WhyNoPartitionReporter
 from executorch.exir.delegate import executorch_call_delegate
 from executorch.exir.dialects._ops import ops as exir_ops
-from executorch.exir.passes import OpReplacePass
+from executorch.exir.passes import OpReplacePass, base_pre_op_replace_passes
+from executorch.exir.passes.memory_format_ops_pass import MemoryFormatOpsPass
+from executorch.exir.passes.remove_mixed_type_operators import RemoveMixedTypeOperators
+from executorch.exir.passes.replace_view_ops_with_view_copy_ops_pass import (
+    ReplaceViewOpsWithViewCopyOpsPass,
+)
 from executorch.exir.verification.verifier import EXIREdgeDialectVerifier
 from torch.export.exported_program import ExportedProgram
 from torch.fx import GraphModule
@@ -55,6 +60,27 @@ if TYPE_CHECKING:
     from executorch.exir.capture import EdgeCompileConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _direct_lowering_edge_legalization_passes(
+    compile_config: "EdgeCompileConfig",
+) -> tuple[Callable[[torch.nn.Module], object], ...]:
+    """Mirror the essential ATen->Edge legalization steps after direct lowering.
+
+    The direct-lowering seam bypasses `_generate_edge_program()`, so replay the
+    same cleanup needed to turn leftover raw ATen view/layout ops into normal
+    Edge-dialect forms before `.to_executorch()` runs.
+    """
+
+    passes: list[Callable[[torch.nn.Module], object]] = [
+        *base_pre_op_replace_passes,
+        ReplaceViewOpsWithViewCopyOpsPass(),
+        RemoveMixedTypeOperators(),
+        OpReplacePass(),
+    ]
+    if not compile_config._skip_dim_order:
+        passes.append(MemoryFormatOpsPass())
+    return tuple(passes)
 
 
 def _is_noop_clone(node: torch.fx.node.Node) -> bool:
@@ -202,7 +228,9 @@ class TOSAPartitioner(Partitioner):
             return None
         return DirectLoweringResult(
             exported_program=direct_program,
-            post_lowering_passes=(OpReplacePass(),),
+            post_lowering_passes=_direct_lowering_edge_legalization_passes(
+                compile_config
+            ),
             override_verifiers=[
                 EXIREdgeDialectVerifier(
                     edge_compile_config=compile_config,
