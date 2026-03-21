@@ -69,6 +69,9 @@ from executorch.exir.passes.normalize_view_copy_base_pass import (
 from executorch.exir.passes.remove_graph_asserts_pass import RemoveGraphAssertsPass
 from executorch.exir.passes.remove_mixed_type_operators import RemoveMixedTypeOperators
 from executorch.exir.passes.replace_edge_with_backend_pass import EdgeToBackendOpsPass
+from executorch.exir.passes.replace_broken_ops_with_function_ops_pass import (
+    ReplaceBrokenOpsWithFunctionalOpsPass,
+)
 from executorch.exir.passes.replace_aten_with_edge_pass import OpReplacePass
 from executorch.exir.passes.replace_view_copy_with_view_pass import (
     ReplaceViewCopyWithViewPass,
@@ -297,6 +300,36 @@ class TestPasses(unittest.TestCase):
         for node in new_graph_module.graph.nodes:
             if node.op == "call_function":
                 self.assertNotEqual(node.target, torch.ops.aten.to.dtype)
+
+    def test_replace_broken_ops_uses__to_copy_for_to_dtype(self) -> None:
+        class Foo(torch.nn.Module):
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                return x.to(dtype=torch.float16)
+
+        gm = export(Foo(), (torch.ones(1, dtype=torch.float32),), strict=True).graph_module
+
+        self.assertTrue(
+            any(
+                node.op == "call_function" and node.target == torch.ops.aten.to.dtype
+                for node in gm.graph.nodes
+            )
+        )
+
+        new_gm = ReplaceBrokenOpsWithFunctionalOpsPass()(gm).graph_module
+
+        self.assertFalse(
+            any(
+                node.op == "call_function" and node.target == torch.ops.aten.to.dtype
+                for node in new_gm.graph.nodes
+            )
+        )
+        self.assertTrue(
+            any(
+                node.op == "call_function"
+                and node.target == torch.ops.aten._to_copy.default
+                for node in new_gm.graph.nodes
+            )
+        )
 
     def test_redundant_slice_copy_removal(self) -> None:
         class FooWithNoSlice(torch.nn.Module):
