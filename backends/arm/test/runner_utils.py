@@ -98,6 +98,16 @@ def _get_quantized_decomposed_out_ops() -> tuple[torch._ops.OpOverload, ...]:
     return _QUANTIZED_DECOMPOSED_OUT_OPS
 
 
+def _channels_last_memory_format_for_dim_order(
+    dim_order: tuple[int, ...],
+) -> torch.memory_format | None:
+    if dim_order == NHWC_ORDER:
+        return torch.channels_last
+    if dim_order == NNHWC_ORDER:
+        return torch.channels_last_3d
+    return None
+
+
 def _run_quantized_decomposed_out_op(
     func: torch._ops.OpOverload,
     args: tuple[Any, ...],
@@ -110,18 +120,23 @@ def _run_quantized_decomposed_out_op(
     input_tensor = args[0]
     input_dim_order = input_tensor.dim_order()
     functional_args = args
+    target_memory_format = _channels_last_memory_format_for_dim_order(input_dim_order)
 
     # Q/DQ ops do not handle channels-last inputs correctly. Run them in contiguous
-    # format, then materialize the expected layout in the provided output tensor.
-    if input_dim_order in (NHWC_ORDER, NNHWC_ORDER):
+    # format, then materialize the expected layout in the op result. The `out`
+    # tensor often comes from `memory.alloc`, which is contiguous regardless of
+    # the logical dim order, so we cannot assume its layout is already correct.
+    if target_memory_format is not None:
         functional_args = (
             input_tensor.to(memory_format=torch.contiguous_format),
             *args[1:],
         )
 
     result = functional_op(*functional_args, **functional_kwargs)
-    if input_dim_order in (NHWC_ORDER, NNHWC_ORDER):
-        result = result.to(memory_format=torch.channels_last)
+    if target_memory_format is not None:
+        result = result.to(memory_format=target_memory_format)
+        if out.dim_order() != input_dim_order:
+            out = out.to(memory_format=target_memory_format)
 
     out.copy_(result)
     return out
