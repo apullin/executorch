@@ -108,7 +108,10 @@ test_pytest_ops_tosa() {
 test_pytest_ops_tosa_direct_lower() {
     echo "${TEST_SUITE_NAME}: Run quantized pytest ops for TOSA with direct backend lowering"
 
-    direct_lower_k='tosa and (INT or 16a8w or a16w8 or quantized or qat)'
+    # Keep this lane scoped to the quantized surface the direct-lowering path
+    # is intended to replace. Pytest -k is substring-based, so plain `INT`
+    # accidentally pulls in tests like `test_int64_tosa_FP[...]`.
+    direct_lower_k='tosa and not FP and (INT or 16a8w or a16w8 or quantized or qat)'
 
     ARM_TEST_ENABLE_DIRECT_BACKEND_LOWERING=1 \
       ARM_TEST_ENABLE_ARM_TOSA_ENGINE_PATCH=1 \
