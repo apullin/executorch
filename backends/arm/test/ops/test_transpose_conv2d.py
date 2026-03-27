@@ -445,9 +445,9 @@ def test_conv_transpose2d_tosa_INT_qat_correct_qspec_wrong_ctor_axis(test_data):
 
 
 _a8w4_transpose_conv_xfails = {
-    k: "per-channel int4 weight quantization is not supported for transpose conv yet."
+    k: "per-channel int4 weight quantization is not supported for grouped transpose conv yet."
     for k in test_data_INT
-    if k.endswith("per_channel_quant=True")
+    if k.startswith("grouped,") and k.endswith("per_channel_quant=True")
 }
 
 
