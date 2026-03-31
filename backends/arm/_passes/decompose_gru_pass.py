@@ -34,7 +34,6 @@ class DecomposeGruPass(ArmPass):
 
     _TARGET = torch.ops.aten.gru.input
 
-    # Ops — always aten since GRU has no edge dialect variant
     _mm = torch.ops.aten.mm.default
     _t = torch.ops.aten.t.default
     _add = torch.ops.aten.add.Tensor

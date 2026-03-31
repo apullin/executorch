@@ -2,18 +2,7 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
-"""Tests for DecomposeGruPass.
-
-Note: PyTorch's export may already decompose aten.gru.input into elementary ops
-before our pass runs. These tests verify that:
-1. The pass runs without errors on GRU models
-2. The output is numerically correct after the pass
-3. The pass handles various GRU configurations (bidirectional, multi-layer, etc.)
-
-The DecomposeGruPass is designed to handle cases where GRU survives export,
-which can happen with certain export configurations or future PyTorch versions.
-
-"""
+"""Tests for DecomposeGruPass."""
 
 from typing import Tuple
 
