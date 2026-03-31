@@ -2,16 +2,7 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
-"""Tests for DecomposeRnnPass.
-
-Note: PyTorch's export may already decompose aten.rnn_tanh.input and
-aten.rnn_relu.input into elementary ops before our pass runs. These tests
-verify that:
-1. The pass runs without errors on RNN models
-2. The output is numerically correct after the pass
-3. The pass handles various RNN configurations (bidirectional, multi-layer, etc.)
-
-"""
+"""Tests for DecomposeRnnPass."""
 
 from typing import Tuple
 
