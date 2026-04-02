@@ -349,6 +349,13 @@ class TOSAPartitioner(Partitioner):
         }
         ops_to_not_decompose_always = {
             torch.ops.aten.logit.default,
+            # Preserve RNN-family ops so DecomposeLstmPass/GruPass/RnnPass
+            # can decompose them with correct shapes. Currently a no-op:
+            # exir rejects these because they alias output (_program.py).
+            torch.ops.aten.lstm.input,
+            torch.ops.aten.gru.input,
+            torch.ops.aten.rnn_tanh.input,
+            torch.ops.aten.rnn_relu.input,
         }
         ops_to_not_decompose_if_integer = {
             torch.ops.aten.eye.default,
