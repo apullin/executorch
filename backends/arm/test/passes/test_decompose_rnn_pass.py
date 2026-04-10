@@ -1,10 +1,11 @@
-# Copyright 2026 Arm Limited and/or its affiliates.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 """Tests for DecomposeRnnPass."""
 
-from typing import Tuple
+from typing import cast, Protocol, Tuple
 
 import torch
 from executorch.backends.arm.test.tester.test_pipeline import (
@@ -13,6 +14,10 @@ from executorch.backends.arm.test.tester.test_pipeline import (
 )
 
 input_t = Tuple[torch.Tensor, torch.Tensor]  # Input x, hidden state h
+
+
+class ModuleWithInputs(Protocol):
+    def get_inputs(self) -> input_t: ...
 
 
 class RNNTanh(torch.nn.Module):
@@ -109,9 +114,10 @@ class RNNRelu(torch.nn.Module):
         return (x, h)
 
 
-def _make_rnn_fp_pipeline(module: torch.nn.Module) -> TosaPipelineFP:
+def _make_rnn_fp_pipeline(module: ModuleWithInputs) -> TosaPipelineFP:
+    nn_module = cast(torch.nn.Module, module)
     pipeline = TosaPipelineFP[input_t](
-        module,
+        nn_module,
         module.get_inputs(),
         aten_op=[],
         exir_op=[],
@@ -124,9 +130,10 @@ def _make_rnn_fp_pipeline(module: torch.nn.Module) -> TosaPipelineFP:
     return pipeline
 
 
-def _make_rnn_int_pipeline(module: torch.nn.Module) -> TosaPipelineINT:
+def _make_rnn_int_pipeline(module: ModuleWithInputs) -> TosaPipelineINT:
+    nn_module = cast(torch.nn.Module, module)
     pipeline = TosaPipelineINT[input_t](
-        module,
+        nn_module,
         module.get_inputs(),
         aten_op=[],
         exir_op=[],
