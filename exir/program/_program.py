@@ -106,6 +106,32 @@ from typing import Any, Callable
 
 from torch.library import Library
 
+_PRESERVE_OP_WARNING_CACHE: Set[str] = set()
+EdgeManagerForPartitionersDefault = Callable[
+    [
+        Dict[str, List[Partitioner]],
+        Dict[str, ExportedProgram],
+        EdgeCompileConfig,
+        Optional[Dict[str, Any]],
+        bool,
+    ],
+    "EdgeProgramManager",
+]
+EdgeManagerForPartitionersOverride = Callable[
+    [
+        EdgeManagerForPartitionersDefault,
+        Dict[str, List[Partitioner]],
+        Dict[str, ExportedProgram],
+        EdgeCompileConfig,
+        Optional[Dict[str, Any]],
+        bool,
+    ],
+    "EdgeProgramManager",
+]
+_EDGE_MANAGER_FOR_PARTITIONERS_OVERRIDE: Optional[
+    EdgeManagerForPartitionersOverride
+] = None
+
 try:
     from executorch.exir.program.fb.logger import et_logger
 except ImportError:
@@ -1161,7 +1187,35 @@ def _can_skip_using_EDGE_DO_NOT_DECOMP(
     return check_op_support is None
 
 
-def _gen_edge_manager_for_partitioners(
+def set_edge_manager_for_partitioners_override(
+    override: Optional[EdgeManagerForPartitionersOverride],
+) -> None:
+    """Install an optional override for edge-manager generation.
+
+    External integrations can use this to customize preserve-op/decomposition
+    handling without monkey-patching `_gen_edge_manager_for_partitioners`.
+    The default ExecuTorch path is unchanged when no override is installed.
+    """
+
+    global _EDGE_MANAGER_FOR_PARTITIONERS_OVERRIDE
+    _EDGE_MANAGER_FOR_PARTITIONERS_OVERRIDE = override
+
+
+def clear_edge_manager_for_partitioners_override() -> None:
+    """Remove any installed edge-manager generation override."""
+
+    set_edge_manager_for_partitioners_override(None)
+
+
+def get_edge_manager_for_partitioners_override() -> Optional[
+    EdgeManagerForPartitionersOverride
+]:
+    """Return the active edge-manager generation override, if present."""
+
+    return _EDGE_MANAGER_FOR_PARTITIONERS_OVERRIDE
+
+
+def _gen_edge_manager_for_partitioners_default(
     partitioner: Dict[str, List[Partitioner]],
     aten_programs: Dict[str, ExportedProgram],
     config: EdgeCompileConfig,
@@ -1279,6 +1333,33 @@ def _gen_edge_manager_for_partitioners(
         edge_manager._etrecord = etrecord
 
     return edge_manager
+
+
+def _gen_edge_manager_for_partitioners(
+    partitioner: Dict[str, List[Partitioner]],
+    aten_programs: Dict[str, ExportedProgram],
+    config: EdgeCompileConfig,
+    constant_methods: Optional[Dict[str, Any]],
+    generate_etrecord: Optional[bool] = False,
+) -> "EdgeProgramManager":
+    override = get_edge_manager_for_partitioners_override()
+    if override is not None:
+        return override(
+            _gen_edge_manager_for_partitioners_default,
+            partitioner,
+            aten_programs,
+            config,
+            constant_methods,
+            bool(generate_etrecord),
+        )
+
+    return _gen_edge_manager_for_partitioners_default(
+        partitioner,
+        aten_programs,
+        config,
+        constant_methods,
+        generate_etrecord,
+    )
 
 
 def _maybe_direct_lower_with_partitioners(
