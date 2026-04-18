@@ -7,6 +7,7 @@ import logging
 import os
 import random
 import sys
+from importlib import import_module
 from typing import Any
 
 import pytest
@@ -45,16 +46,30 @@ def pytest_configure(config):
     if executorch_src_root not in sys.path:
         sys.path.insert(0, executorch_src_root)
 
+    integration_module_name = os.environ.get(
+        "ARM_TOSA_ENGINE_IMPORT", "fast_preprocess"
+    )
+
     try:
-        from fast_preprocess import patch_tosa_backend
-    except ImportError as exc:
+        integration_module = import_module(integration_module_name)
+        install = getattr(
+            integration_module,
+            "install",
+            getattr(integration_module, "patch_tosa_backend", None),
+        )
+        if not callable(install):
+            raise AttributeError(
+                f"{integration_module_name} does not expose install() or patch_tosa_backend()"
+            )
+    except (ImportError, AttributeError) as exc:
         raise RuntimeError(
-            "ARM test lane requested arm-tosa-engine patching, but fast_preprocess "
-            "could not be imported. Set ARM_TOSA_ENGINE_ROOT and install the "
-            "arm-tosa-engine package in the active environment."
+            "ARM test lane requested arm-tosa-engine patching, but the "
+            f"integration module '{integration_module_name}' could not be "
+            "loaded. Set ARM_TOSA_ENGINE_ROOT or ARM_TOSA_ENGINE_IMPORT and "
+            "install the arm-tosa-engine package in the active environment."
         ) from exc
 
-    patch_tosa_backend()
+    install()
 
 
 def pytest_collection_modifyitems(config, items):
