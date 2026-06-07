@@ -133,6 +133,14 @@ def _contains_delegate_call(program: ExportedProgram) -> bool:
     return False
 
 
+def _count_delegate_calls(program: ExportedProgram) -> int:
+    return sum(
+        1
+        for node in program.graph.nodes
+        if node.op == "call_function" and node.target == executorch_call_delegate
+    )
+
+
 def _contains_raw_convolution(program: ExportedProgram) -> bool:
     for node in program.graph.nodes:
         if node.op != "call_function":
@@ -248,6 +256,11 @@ class TOSAPartitioner(Partitioner):
             # A raw convNd left undelegated on CPU (e.g. conv preceded by a delegated
             # non-constant pad) has no out variant and cannot be functionalized. Fall back
             # to standard lowering, which decomposes it to aten.convolution.
+            return None
+        if _count_delegate_calls(direct_program) > 1:
+            # The direct lane is a single-delegate fast path; if lowering fragmented into
+            # multiple delegates (e.g. unfused view ops between matmuls), defer to standard
+            # lowering, which fuses them into one delegate.
             return None
         return DirectLoweringResult(
             exported_program=direct_program,
