@@ -143,6 +143,10 @@ def _contains_raw_convolution(program: ExportedProgram) -> bool:
     return False
 
 
+def _contains_control_flow(program: ExportedProgram) -> bool:
+    return any(get_cond_while_submodules_nested(program.graph_module))
+
+
 def is_partitioned(
     node: torch.fx.Node,
     tag: str,
@@ -231,6 +235,10 @@ class TOSAPartitioner(Partitioner):
         if not compile_config._use_edge_ops:
             return None
         if not _contains_raw_quantized_decomposed_op(exported_program):
+            return None
+        if _contains_control_flow(exported_program):
+            # cond/while submodules are mishandled by direct lowering; fall back to the
+            # standard path which lowers control flow correctly.
             return None
 
         direct_program = to_backend(exported_program, self)
