@@ -151,6 +151,16 @@ def _contains_raw_convolution(program: ExportedProgram) -> bool:
     return False
 
 
+def _contains_raw_conv_transpose(program: ExportedProgram) -> bool:
+    for node in program.graph.nodes:
+        if node.op != "call_function":
+            continue
+        name = node.target.name() if hasattr(node.target, "name") else str(node.target)
+        if name.startswith("aten::conv_transpose"):
+            return True
+    return False
+
+
 def _contains_control_flow(program: ExportedProgram) -> bool:
     return any(get_cond_while_submodules_nested(program.graph_module))
 
@@ -247,6 +257,10 @@ class TOSAPartitioner(Partitioner):
         if _contains_control_flow(exported_program):
             # cond/while submodules are mishandled by direct lowering; fall back to the
             # standard path which lowers control flow correctly.
+            return None
+        if _contains_raw_conv_transpose(exported_program):
+            # tosater mislowers raw conv_transpose (wrong output shape for output_padding
+            # and asymmetric configs); the standard path decomposes it to aten.convolution.
             return None
 
         direct_program = to_backend(exported_program, self)
