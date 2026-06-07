@@ -133,6 +133,20 @@ def _contains_delegate_call(program: ExportedProgram) -> bool:
     return False
 
 
+_RAW_CONV_TARGETS = (
+    torch.ops.aten.conv1d.default,
+    torch.ops.aten.conv2d.default,
+    torch.ops.aten.conv3d.default,
+)
+
+
+def _contains_raw_convolution(program: ExportedProgram) -> bool:
+    for node in program.graph.nodes:
+        if node.op == "call_function" and node.target in _RAW_CONV_TARGETS:
+            return True
+    return False
+
+
 def is_partitioned(
     node: torch.fx.Node,
     tag: str,
@@ -225,6 +239,11 @@ class TOSAPartitioner(Partitioner):
 
         direct_program = to_backend(exported_program, self)
         if not _contains_delegate_call(direct_program):
+            return None
+        if _contains_raw_convolution(direct_program):
+            # A raw convNd left undelegated on CPU (e.g. conv preceded by a delegated
+            # non-constant pad) has no out variant and cannot be functionalized. Fall back
+            # to standard lowering, which decomposes it to aten.convolution.
             return None
         return DirectLoweringResult(
             exported_program=direct_program,
