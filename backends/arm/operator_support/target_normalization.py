@@ -7,11 +7,18 @@ _TARGET_ALIASES = {
     "aten::clone.default": "dim_order_ops::_clone_dim_order.default",
     "aten::conv1d.default": "aten::convolution.default",
     "aten::conv2d.default": "aten::convolution.default",
+    "aten::copy_.default": "aten::copy.default",
+    "aten::expand.default": "aten::expand_copy.default",
+    "aten::fill_.Scalar": "aten::full_like.default",
     "aten::flatten.using_ints": "aten::view_copy.default",
     "aten::permute.default": "aten::permute_copy.default",
     "aten::reshape.default": "aten::view_copy.default",
     "aten::slice.Tensor": "aten::slice_copy.Tensor",
     "aten::_to_copy.default": "dim_order_ops::_to_dim_order_copy.default",
+    "aten::_unsafe_view.default": "aten::view_copy.default",
+    "aten::view.default": "aten::view_copy.default",
+    "aten::zeros.default": "aten::full.default",
+    "aten::zeros_like.default": "aten::full_like.default",
 }
 
 
