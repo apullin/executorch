@@ -7,7 +7,6 @@ _TARGET_ALIASES = {
     "aten::clone.default": "dim_order_ops::_clone_dim_order.default",
     "aten::conv1d.default": "aten::convolution.default",
     "aten::conv2d.default": "aten::convolution.default",
-    "aten::conv3d.default": "aten::convolution.default",
     "aten::flatten.using_ints": "aten::view_copy.default",
     "aten::permute.default": "aten::permute_copy.default",
     "aten::reshape.default": "aten::view_copy.default",
