@@ -102,7 +102,7 @@ def _is_noop_to_dim_order_copy(node: torch.fx.node.Node) -> bool:
 
 
 def _is_noop_expand(node: torch.fx.node.Node) -> bool:
-    if node.target != exir_ops.edge.aten.expand_copy.default:
+    if target_key(node.target) != target_key(exir_ops.edge.aten.expand_copy.default):
         return False
     else:
         multiples, changes_rank = calculate_multiples(node.args)

@@ -17,8 +17,6 @@ _TARGET_ALIASES = {
     "aten::_to_copy.default": "dim_order_ops::_to_dim_order_copy.default",
     "aten::_unsafe_view.default": "aten::view_copy.default",
     "aten::view.default": "aten::view_copy.default",
-    "aten::zeros.default": "aten::full.default",
-    "aten::zeros_like.default": "aten::full_like.default",
 }
 
 
