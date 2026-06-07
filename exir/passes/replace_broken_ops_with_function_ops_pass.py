@@ -19,6 +19,12 @@ class ReplaceBrokenOpsWithFunctionalOpsPass(ExportPass):
     TODO: this can be refactors into a general OpReplacementPass
     """
 
+    _VIEW_COPY_FALLBACK_PREFIXES = (
+        "aten::reshape",
+        "aten::unflatten",
+    )
+    _PRESERVE_VIEW_OP_PREFIXES = ("aten::contiguous",)
+
     @staticmethod
     def _functionalized_view_target(op):
         namespace, op_full_name = op.name().split("::")
@@ -50,11 +56,41 @@ class ReplaceBrokenOpsWithFunctionalOpsPass(ExportPass):
         normalized_kwargs.pop("copy", None)
         return (args[0],), normalized_kwargs
 
+    @staticmethod
+    def _fallback_view_copy_rewrite(op, args, meta):
+        op_name = op.name()
+        if any(
+            op_name.startswith(prefix)
+            for prefix in ReplaceBrokenOpsWithFunctionalOpsPass._PRESERVE_VIEW_OP_PREFIXES
+        ):
+            return op, args, {}
+
+        if not any(op_name.startswith(prefix) for prefix in ReplaceBrokenOpsWithFunctionalOpsPass._VIEW_COPY_FALLBACK_PREFIXES):
+            return None
+
+        output_val = meta["val"] if "val" in meta else None
+        output_shape = getattr(output_val, "shape", None)
+        if output_shape is None:
+            raise RuntimeError(f"Missing output shape metadata for {op_name}")
+
+        return (
+            torch.ops.aten.view_copy.default,
+            (args[0], list(output_shape)),
+            {},
+        )
+
     # pyre-ignore
     def call_operator(self, op, args, kwargs, meta):
         if op.is_view:
-            view_copy_op = self._functionalized_view_target(op)
-            if op.name().startswith("aten::to."):
-                args, kwargs = self._normalize_to_copy_args(op, args, kwargs)
-            return super().call_operator(view_copy_op, args, kwargs, meta)
+            try:
+                view_copy_op = self._functionalized_view_target(op)
+                if op.name().startswith("aten::to."):
+                    args, kwargs = self._normalize_to_copy_args(op, args, kwargs)
+                return super().call_operator(view_copy_op, args, kwargs, meta)
+            except (AttributeError, RuntimeError):
+                fallback = self._fallback_view_copy_rewrite(op, args, meta)
+                if fallback is None:
+                    raise
+                replacement_op, args, kwargs = fallback
+                return super().call_operator(replacement_op, args, kwargs, meta)
         return super().call_operator(op, args, kwargs, meta)
