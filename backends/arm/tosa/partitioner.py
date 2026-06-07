@@ -47,9 +47,7 @@ from executorch.exir.dialects._ops import ops as exir_ops
 from executorch.exir.passes import OpReplacePass, base_pre_op_replace_passes
 from executorch.exir.passes.memory_format_ops_pass import MemoryFormatOpsPass
 from executorch.exir.passes.remove_mixed_type_operators import RemoveMixedTypeOperators
-from executorch.exir.passes.replace_view_ops_with_view_copy_ops_pass import (
-    ReplaceViewOpsWithViewCopyOpsPass,
-)
+from torch._export.passes import ReplaceViewOpsWithViewCopyOpsPass
 from executorch.exir.verification.verifier import EXIREdgeDialectVerifier
 from torch.export.exported_program import ExportedProgram
 from torch.fx import GraphModule
