@@ -151,6 +151,16 @@ def _contains_raw_convolution(program: ExportedProgram) -> bool:
     return False
 
 
+def _contains_raw_softplus(program: ExportedProgram) -> bool:
+    for node in program.graph.nodes:
+        if node.op != "call_function":
+            continue
+        name = node.target.name() if hasattr(node.target, "name") else str(node.target)
+        if name.startswith("aten::softplus"):
+            return True
+    return False
+
+
 def _contains_control_flow(program: ExportedProgram) -> bool:
     return any(get_cond_while_submodules_nested(program.graph_module))
 
@@ -248,8 +258,18 @@ class TOSAPartitioner(Partitioner):
             # cond/while submodules are mishandled by direct lowering; fall back to the
             # standard path which lowers control flow correctly.
             return None
+        if _contains_raw_softplus(exported_program):
+            # softplus decomposes to unquantized ops that the direct lane would leave raw on
+            # the CPU graph; the standard path decomposes it so they are rejected as expected.
+            return None
 
-        direct_program = to_backend(exported_program, self)
+        try:
+            direct_program = to_backend(exported_program, self)
+        except Exception as e:
+            logging.debug(
+                "Direct lowering failed (%s); falling back to standard lowering.", e
+            )
+            return None
         if not _contains_delegate_call(direct_program):
             return None
         if _contains_raw_convolution(direct_program):
