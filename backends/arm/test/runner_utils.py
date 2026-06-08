@@ -81,11 +81,13 @@ def _get_quantized_decomposed_out_ops() -> tuple[torch._ops.OpOverload, ...]:
     if _QUANTIZED_DECOMPOSED_OUT_OPS is not None:
         return _QUANTIZED_DECOMPOSED_OUT_OPS
 
-    ops: list[torch._ops.OpOverload] = [
-        torch.ops.quantized_decomposed.quantize_per_tensor.out,
-        torch.ops.quantized_decomposed.dequantize_per_tensor.out,
-    ]
-    for opname in ("quantize_per_channel", "dequantize_per_channel"):
+    ops: list[torch._ops.OpOverload] = []
+    for opname in (
+        "quantize_per_tensor",
+        "dequantize_per_tensor",
+        "quantize_per_channel",
+        "dequantize_per_channel",
+    ):
         packet = getattr(torch.ops.quantized_decomposed, opname)
         default_op = getattr(packet, "default", None)
         if default_op is not None:
