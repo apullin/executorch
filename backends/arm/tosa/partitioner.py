@@ -44,6 +44,7 @@ from executorch.exir.backend.backend_api import to_backend
 from executorch.exir.backend.utils import tag_constant_data, WhyNoPartitionReporter
 from executorch.exir.delegate import executorch_call_delegate
 from executorch.exir.dialects._ops import ops as exir_ops
+from executorch.exir.pass_base import ExportPass, ProxyValue
 from executorch.exir.passes import OpReplacePass, base_pre_op_replace_passes
 from executorch.exir.passes.memory_format_ops_pass import MemoryFormatOpsPass
 from executorch.exir.passes.remove_mixed_type_operators import RemoveMixedTypeOperators
@@ -62,6 +63,36 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class DecomposeTypeAsPass(ExportPass):
+    """Decompose `aten.type_as(self, other)` into a dtype cast.
+
+    type_as is CompositeImplicitAutograd; stock lowering decomposes it via the
+    default table inside `_generate_edge_program()`. The direct-lowering seam
+    bypasses that, so an undelegated type_as reaches `to_executorch()` with no
+    out variant. Rewrite it to `self.to(other.dtype)` the way stock does.
+    """
+
+    def call_operator(self, op, args, kwargs, meta):  # pyre-ignore
+        if op != torch.ops.aten.type_as.default or len(args) < 2:
+            return super().call_operator(op, args, kwargs, meta)
+        src, other = args[0], args[1]
+        if not (isinstance(other, ProxyValue) and other.is_tensor()):
+            return super().call_operator(op, args, kwargs, meta)
+        target_dtype = other.to_tensor().dtype
+        if (
+            isinstance(src, ProxyValue)
+            and src.is_tensor()
+            and src.to_tensor().dtype == target_dtype
+        ):
+            return src
+        return super().call_operator(
+            torch.ops.aten._to_copy.default,
+            (src,),
+            {"dtype": target_dtype},
+            meta,
+        )
+
+
 def _direct_lowering_edge_legalization_passes(
     compile_config: "EdgeCompileConfig",
 ) -> tuple[Callable[[torch.nn.Module], object], ...]:
@@ -73,6 +104,7 @@ def _direct_lowering_edge_legalization_passes(
     """
 
     passes: list[Callable[[torch.nn.Module], object]] = [
+        DecomposeTypeAsPass(),
         *base_pre_op_replace_passes,
         ReplaceViewOpsWithViewCopyOpsPass(),
         RemoveMixedTypeOperators(),
