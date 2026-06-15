@@ -7,7 +7,7 @@
 # pyre-strict
 import torch
 
-from executorch.exir.pass_base import ExportPass
+from executorch.exir.pass_base import ExportPass, PassResult
 
 
 class ReplaceBrokenOpsWithFunctionalOpsPass(ExportPass):
@@ -78,6 +78,44 @@ class ReplaceBrokenOpsWithFunctionalOpsPass(ExportPass):
             (args[0], list(output_shape)),
             {},
         )
+
+    def call(self, graph_module: torch.fx.GraphModule) -> PassResult:
+        modified = False
+        for module in graph_module.modules():
+            if not isinstance(module, torch.fx.GraphModule):
+                continue
+            module_modified = False
+            for node in module.graph.nodes:
+                if node.op != "call_function" or not getattr(
+                    node.target, "is_view", False
+                ):
+                    continue
+
+                try:
+                    replacement_op = self._functionalized_view_target(node.target)
+                    args, kwargs = node.args, node.kwargs
+                    if node.target.name().startswith("aten::to."):
+                        args, kwargs = self._normalize_to_copy_args(
+                            node.target, node.args, node.kwargs
+                        )
+                except (AttributeError, RuntimeError):
+                    fallback = self._fallback_view_copy_rewrite(
+                        node.target, node.args, node.meta
+                    )
+                    if fallback is None:
+                        raise
+                    replacement_op, args, kwargs = fallback
+
+                node.target = replacement_op
+                node.args = args
+                node.kwargs = kwargs
+                module_modified = True
+
+            if module_modified:
+                module.recompile()
+                modified = True
+
+        return PassResult(graph_module, modified)
 
     # pyre-ignore
     def call_operator(self, op, args, kwargs, meta):

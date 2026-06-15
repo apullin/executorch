@@ -14,6 +14,7 @@ be delegated to the TOSA backend. Use this module to:
 """
 
 import logging
+import os
 from itertools import count
 from typing import Callable, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
@@ -61,6 +62,25 @@ if TYPE_CHECKING:
     from executorch.exir.capture import EdgeCompileConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _direct_lower_node_limit() -> int:
+    raw = os.environ.get("ET_ARM_TOSA_DIRECT_LOWER_NODE_LIMIT")
+    if raw is None:
+        raw = os.environ.get("ARM_TOSA_ENGINE_DIRECT_LOWER_NODE_LIMIT")
+    if raw is None:
+        return 128
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning(
+            "Ignoring invalid direct-lower node limit %r; using default 128.", raw
+        )
+        return 128
+
+
+def _graph_node_count(program: ExportedProgram) -> int:
+    return sum(1 for _ in program.graph.nodes)
 
 
 class DecomposeTypeAsPass(ExportPass):
@@ -293,6 +313,9 @@ class TOSAPartitioner(Partitioner):
         if _contains_raw_softplus(exported_program):
             # softplus decomposes to unquantized ops that the direct lane would leave raw on
             # the CPU graph; the standard path decomposes it so they are rejected as expected.
+            return None
+        node_limit = _direct_lower_node_limit()
+        if node_limit > 0 and _graph_node_count(exported_program) > node_limit:
             return None
 
         try:
