@@ -1013,6 +1013,28 @@ def _restore_transformed_ops_to_aten_ops(program: ExportedProgram):
                 node.target = transform_op_to_aten_op[str(node.target)]
 
 
+def _has_untransformed_no_decomp_ops(
+    program: ExportedProgram,
+    ops_no_decomp: Sequence[torch._ops.OpOverload],
+) -> bool:
+    ops_no_decomp_set = set(ops_no_decomp)
+    if not ops_no_decomp_set:
+        return False
+
+    def graph_has_target(graph: torch.fx.Graph) -> bool:
+        return any(
+            node.op == "call_function" and node.target in ops_no_decomp_set
+            for node in graph.nodes
+        )
+
+    if graph_has_target(program.graph):
+        return True
+    return any(
+        graph_has_target(submod.graph)
+        for _, submod, _ in get_control_flow_submodules(program.graph_module)
+    )
+
+
 # Returns the op in edge_no_decomp_namespace namespace for the aten
 # op that is passed in.
 def _get_transformed_op(op_aten):
@@ -1296,8 +1318,13 @@ def _gen_edge_manager_for_partitioners_default(
                     )
                     final_ops_to_preserve.update(preserved_ops)
 
-                    # Second pass of decompositions with this partitioner's preserved ops after filtering
-                    program = program.run_decompositions(_default_decomposition_table())
+                    # Decompose no-decomp ops rejected by the support filter. If every
+                    # remaining candidate was rewritten into EDGE_DO_NOT_DECOMP, the
+                    # full-table pass is a no-op and costs a complete graph rewrite.
+                    if _has_untransformed_no_decomp_ops(program, curr_ops_no_decomp):
+                        program = program.run_decompositions(
+                            _default_decomposition_table()
+                        )
 
                     # Restore ops from edge_no_decomp_namespace to aten ops
                     _restore_transformed_ops_to_aten_ops(program)
