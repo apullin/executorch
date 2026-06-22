@@ -20,8 +20,19 @@ DISALLOW_LIST = [
     torch.ops.aten.scalar_tensor.default,
 ]
 
+_SPECIAL_ATEN_TO_EDGE = {
+    # `unbind` returns a tensor list and has no same-name Edge op. Route it to
+    # the existing `unbind_copy` edge op, which preserves the tensor-list shape
+    # and does participate in the normal out-variant legalization path.
+    torch.ops.aten.unbind.int: ops.edge.aten.unbind_copy.int,
+}
+
 
 def aten_to_edge(aten_op: torch._ops.OpOverload) -> EdgeOpOverload:
+    special_op = _SPECIAL_ATEN_TO_EDGE.get(aten_op)
+    if special_op is not None:
+        return special_op
+
     # Assume qualified op name: aten::add.Tensor
     op_namespace, op_name, op_overload_name = (
         aten_op.namespace,

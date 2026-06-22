@@ -29,6 +29,7 @@ from typing import Dict, FrozenSet, Optional, Tuple
 
 import torch
 from torch._ops import OpOverload
+from torch.library import Library
 from torchgen.model import FunctionSchema, SchemaKind
 
 # cache the FunctionSchema so we don't need to parse everytime>
@@ -47,6 +48,102 @@ _mutable_to_out_variant_map: Dict[OpOverload, Optional[OpOverload]] = {}
 # schemas mismatch. This map collects all of these cases and provides proper
 # error message to user. The key is an `OpOverload` of a functional variant.
 _schema_mismatch_map: Dict[OpOverload, Optional[FunctionSchema]] = {}
+
+_QUANTIZED_OUT_VARIANT_FALLBACKS: Dict[Tuple[str, str], Tuple[str, str]] = {
+    (
+        "add",
+        "default",
+    ): (
+        "out",
+        "add.out(Tensor a, float a_scale, int a_zero_point, int a_quant_min, int a_quant_max, Tensor b, float b_scale, int b_zero_point, int b_quant_min, int b_quant_max, float out_scale, int out_zero_point, int out_quant_min, int out_quant_max, *, Tensor(a!) out) -> Tensor(a!)",
+    ),
+    (
+        "choose_qparams",
+        "tensor",
+    ): (
+        "Tensor_out",
+        "choose_qparams.Tensor_out(Tensor input, int quant_min, int quant_max, float eps, ScalarType dtype, *, Tensor(a!) scale_out, Tensor(b!) zero_point_out) -> (Tensor(a!), Tensor(b!))",
+    ),
+    (
+        "choose_qparams_per_token_asymmetric",
+        "default",
+    ): (
+        "out",
+        "choose_qparams_per_token_asymmetric.out(Tensor input, ScalarType dtype, *, Tensor(a!) scale_out, Tensor(b!) zero_point_out) -> (Tensor(a!), Tensor(b!))",
+    ),
+    (
+        "dequantize_per_channel",
+        "default",
+    ): (
+        "out",
+        "dequantize_per_channel.out(Tensor input, Tensor scales, Tensor? zero_points, int axis, int quant_min, int quant_max, ScalarType dtype, *, ScalarType? out_dtype=None, Tensor(a!) out) -> Tensor(a!)",
+    ),
+    (
+        "dequantize_per_tensor",
+        "default",
+    ): (
+        "out",
+        "dequantize_per_tensor.out(Tensor input, float scale, int zero_point, int quant_min, int quant_max, ScalarType dtype, *, ScalarType? out_dtype=None, Tensor(a!) out) -> Tensor(a!)",
+    ),
+    (
+        "dequantize_per_tensor",
+        "tensor",
+    ): (
+        "Tensor_out",
+        "dequantize_per_tensor.Tensor_out(Tensor input, Tensor scale, Tensor zero_point, int quant_min, int quant_max, ScalarType dtype, *, ScalarType? out_dtype=None, Tensor(a!) out) -> Tensor(a!)",
+    ),
+    (
+        "dequantize_per_token",
+        "default",
+    ): (
+        "out",
+        "dequantize_per_token.out(Tensor input, Tensor scales, Tensor zero_points, int quant_min, int quant_max, ScalarType dtype, ScalarType output_dtype, *, Tensor(a!) out) -> Tensor(a!)",
+    ),
+    (
+        "mixed_linear",
+        "default",
+    ): (
+        "out",
+        "mixed_linear.out(Tensor input, Tensor weight, Tensor weight_scales, Tensor? weight_zero_points, ScalarType? dtype=None, *, Tensor(a!) out) -> Tensor(a!)",
+    ),
+    (
+        "mixed_mm",
+        "default",
+    ): (
+        "out",
+        "mixed_mm.out(Tensor input, Tensor weight, Tensor weight_scales, Tensor? weight_zero_points, *, Tensor(a!) out) -> Tensor(a!)",
+    ),
+    (
+        "quantize_per_channel",
+        "default",
+    ): (
+        "out",
+        "quantize_per_channel.out(Tensor input, Tensor scales, Tensor zero_points, int axis, int quant_min, int quant_max, ScalarType dtype, *, Tensor(a!) out) -> Tensor(a!)",
+    ),
+    (
+        "quantize_per_tensor",
+        "default",
+    ): (
+        "out",
+        "quantize_per_tensor.out(Tensor input, float scale, int zero_point, int quant_min, int quant_max, ScalarType dtype, *, Tensor(a!) out) -> Tensor(a!)",
+    ),
+    (
+        "quantize_per_tensor",
+        "tensor",
+    ): (
+        "Tensor_out",
+        "quantize_per_tensor.Tensor_out(Tensor input, Tensor scale, Tensor zero_point, int quant_min, int quant_max, ScalarType dtype, *, Tensor(a!) out) -> Tensor(a!)",
+    ),
+    (
+        "quantize_per_token",
+        "default",
+    ): (
+        "out",
+        "quantize_per_token.out(Tensor input, Tensor scales, Tensor zero_points, int quant_min, int quant_max, ScalarType dtype, *, Tensor(a!) out) -> Tensor(a!)",
+    ),
+}
+
+_quantized_out_variant_fallback_lib: Optional[Library] = None
 
 
 def _pybind_schema_to_native_schema(
@@ -189,13 +286,63 @@ def get_op_overload(qualified_opname: str, overload: str) -> OpOverload:
     ns, opname = parse_qualified_opname(qualified_opname)
     if not overload:
         overload = "default"
-    return getattr(getattr(getattr(torch.ops, ns), opname), overload)
+    packet = getattr(getattr(torch.ops, ns), opname)
+    try:
+        return getattr(packet, overload)
+    except AttributeError:
+        if ns != "quantized_decomposed":
+            raise
+
+        default_op = getattr(packet, "default", None)
+        if default_op is None or not _ensure_quantized_out_variant_registered(default_op):
+            raise
+
+        refreshed_packet = getattr(getattr(torch.ops, ns), opname)
+        return getattr(refreshed_packet, overload)
 
 
 def schema_to_opoverload(schema: FunctionSchema) -> OpOverload:
     qualified_name = str(schema.name.name)
     overload = schema.name.overload_name
     return get_op_overload(qualified_name, overload)
+
+
+def _ensure_quantized_out_variant_registered(op_overload: OpOverload) -> bool:
+    if op_overload.namespace != "quantized_decomposed":
+        return False
+
+    op_name = op_overload._schema.name.split("::")[1]
+    overload_name = op_overload._schema.overload_name or "default"
+    fallback = _QUANTIZED_OUT_VARIANT_FALLBACKS.get((op_name, overload_name))
+    if fallback is None:
+        return False
+
+    out_overload_name, schema = fallback
+    packet = getattr(torch.ops.quantized_decomposed, op_name, None)
+    if packet is not None and hasattr(packet, out_overload_name):
+        return True
+
+    global _quantized_out_variant_fallback_lib
+    if _quantized_out_variant_fallback_lib is None:
+        _quantized_out_variant_fallback_lib = Library(
+            "quantized_decomposed", "FRAGMENT"
+        )
+
+    try:
+        _quantized_out_variant_fallback_lib.define(schema)
+    except RuntimeError:
+        packet = getattr(torch.ops.quantized_decomposed, op_name, None)
+        if packet is None or not hasattr(packet, out_overload_name):
+            raise
+
+    return True
+
+
+def _refresh_out_variant_mapping(op_overload: OpOverload) -> None:
+    _func_to_out_variant_map.pop(op_overload, None)
+    _mutable_to_out_variant_map.pop(op_overload, None)
+    _schema_mismatch_map.pop(op_overload, None)
+    set_mapping_for_op(op_overload)
 
 
 def set_mapping_for_op(op: OpOverload) -> None:
@@ -321,6 +468,13 @@ def to_out_variant(op_overload: OpOverload) -> Tuple[OpOverload, Tuple[str]]:
         out_var = _mutable_to_out_variant_map[op_overload]
     else:
         out_var = _func_to_out_variant_map.get(op_overload)
+
+    if not out_var and _ensure_quantized_out_variant_registered(op_overload):
+        _refresh_out_variant_mapping(op_overload)
+        if op_overload in _mutable_to_out_variant_map:
+            out_var = _mutable_to_out_variant_map[op_overload]
+        else:
+            out_var = _func_to_out_variant_map.get(op_overload)
 
     if not out_var:
         msg = f"Missing out variant for functional op: {schema} . Make sure you have loaded your custom operator library for compiler. E.g., custom_ops_generated_lib"

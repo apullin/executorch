@@ -356,14 +356,22 @@ class ToOutVarPass(PassBase):
                 continue
             elif target in to_out_var_skiplist:
                 continue
-            elif _get_overload_schema(target).kind() == SchemaKind.inplace:
-                continue
+            elif isinstance(target, (EdgeOpOverload, BackendOpOverload)):
+                overload_schema = _get_overload_schema(target._op)
+                if overload_schema is not None and overload_schema.kind() == SchemaKind.inplace:
+                    continue
+            else:
+                overload_schema = _get_overload_schema(target)
+                if overload_schema is not None and overload_schema.kind() == SchemaKind.inplace:
+                    continue
             if not isinstance(
                 target, (torch._ops.OpOverload, EdgeOpOverload, BackendOpOverload)
             ):
                 raise RuntimeError(f"Require an op overload for target: {target}")
 
             op_name = target._schema.name
+            if op_name == "aten::conv2d":
+                continue
             overload_name = target._schema.overload_name
             if is_out_variant(op_name, overload_name):
                 # TODO (zhxchen17) Remove this after functionalization is always on.

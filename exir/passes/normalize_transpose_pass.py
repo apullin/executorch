@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import torch
-from executorch.exir.pass_base import ExportPass
+from executorch.exir.pass_base import ExportPass, PassResult
 
 
 class NormalizeTransposePass(ExportPass):
@@ -15,6 +15,16 @@ class NormalizeTransposePass(ExportPass):
     TODO: once we have that, we should remove this pass.
     Check test_normalize_transpose_op in test_passes.py for more details
     """
+
+    def call(self, graph_module: torch.fx.GraphModule) -> PassResult:
+        if not any(
+            node.op == "call_function" and node.target == torch.ops.aten.t.default
+            for module in graph_module.modules()
+            if isinstance(module, torch.fx.GraphModule)
+            for node in module.graph.nodes
+        ):
+            return PassResult(graph_module, False)
+        return super().call(graph_module)
 
     def call_operator(self, op, args, kwargs, meta):
         if op == torch.ops.aten.t.default:

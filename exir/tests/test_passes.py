@@ -69,6 +69,10 @@ from executorch.exir.passes.normalize_view_copy_base_pass import (
 from executorch.exir.passes.remove_graph_asserts_pass import RemoveGraphAssertsPass
 from executorch.exir.passes.remove_mixed_type_operators import RemoveMixedTypeOperators
 from executorch.exir.passes.replace_edge_with_backend_pass import EdgeToBackendOpsPass
+from executorch.exir.passes.replace_broken_ops_with_function_ops_pass import (
+    ReplaceBrokenOpsWithFunctionalOpsPass,
+)
+from executorch.exir.passes.replace_aten_with_edge_pass import OpReplacePass
 from executorch.exir.passes.replace_view_copy_with_view_pass import (
     ReplaceViewCopyWithViewPass,
 )
@@ -297,6 +301,36 @@ class TestPasses(unittest.TestCase):
             if node.op == "call_function":
                 self.assertNotEqual(node.target, torch.ops.aten.to.dtype)
 
+    def test_replace_broken_ops_uses__to_copy_for_to_dtype(self) -> None:
+        class Foo(torch.nn.Module):
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                return x.to(dtype=torch.float16)
+
+        gm = export(Foo(), (torch.ones(1, dtype=torch.float32),), strict=True).graph_module
+
+        self.assertTrue(
+            any(
+                node.op == "call_function" and node.target == torch.ops.aten.to.dtype
+                for node in gm.graph.nodes
+            )
+        )
+
+        new_gm = ReplaceBrokenOpsWithFunctionalOpsPass()(gm).graph_module
+
+        self.assertFalse(
+            any(
+                node.op == "call_function" and node.target == torch.ops.aten.to.dtype
+                for node in new_gm.graph.nodes
+            )
+        )
+        self.assertTrue(
+            any(
+                node.op == "call_function"
+                and node.target == torch.ops.aten._to_copy.default
+                for node in new_gm.graph.nodes
+            )
+        )
+
     def test_redundant_slice_copy_removal(self) -> None:
         class FooWithNoSlice(torch.nn.Module):
             def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -434,6 +468,43 @@ class TestPasses(unittest.TestCase):
         # Returning the TensorSpec item directly cause future getitem op fails.
         self.assertTrue(isinstance(val, (tuple, list)))
         self.assertEqual(1, len(val))
+
+    def test_to_out_variant_handles_edge_op_overload(self) -> None:
+        class Add(torch.nn.Module):
+            def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+                return x + y
+
+        prog = to_edge(
+            export(Add(), (torch.ones(1), torch.zeros(1)), strict=True),
+            compile_config=EdgeCompileConfig(_check_ir_validity=False),
+        ).exported_program()
+        gm = prog.graph_module
+        add_node = next(
+            node
+            for node in gm.graph.nodes
+            if node.op == "call_function" and "aten.add" in str(node.target)
+        )
+        add_node.target = exir_ops.edge.aten.add.Tensor
+        gm.recompile()
+
+        new_gm_res = ToOutVarPass()(gm)
+        self.assertIsNotNone(new_gm_res)
+
+    def test_to_out_variant_skips_conv2d_without_out_variant(self) -> None:
+        class Conv(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.conv = torch.nn.Conv2d(2, 4, kernel_size=3, padding=1)
+
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                return self.conv(x)
+
+        prog = to_edge(
+            export(Conv(), (torch.randn(1, 2, 8, 8),), strict=True),
+            compile_config=EdgeCompileConfig(_check_ir_validity=False),
+        ).exported_program()
+        new_gm_res = ToOutVarPass()(prog.graph_module)
+        self.assertIsNotNone(new_gm_res)
 
     def test_to_out_variant_multiple_out(self) -> None:
         class MyModel(nn.Module):
@@ -1227,6 +1298,18 @@ class TestPasses(unittest.TestCase):
         FileCheck().check("torch.ops.aten.add.Tensor").check(
             "torch.ops.aten.relu.default"
         ).run(gm_retraced.exported_program().graph_module.code)
+
+    def test_op_replace_pass_maps_unbind_to_copy(self) -> None:
+        class UnbindModule(torch.nn.Module):
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                first, second = torch.unbind(x, dim=0)
+                return first + second
+
+        gm = export(UnbindModule(), (torch.randn(2, 3),), strict=True)
+        lowered = OpReplacePass().call(gm.graph_module).graph_module
+
+        FileCheck().check("unbind_copy").run(lowered.code)
+        self.assertNotIn("aten.unbind.int", lowered.code)
 
     def test_debug_handle_generator_pass(self) -> None:
         eager_model = MLP(2, output_size=4)
