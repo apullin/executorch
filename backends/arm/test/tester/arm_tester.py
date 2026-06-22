@@ -8,7 +8,9 @@ import copy
 import inspect
 
 import logging
+import os
 import platform
+from dataclasses import replace
 
 from collections import Counter, defaultdict
 from pprint import pformat
@@ -119,6 +121,24 @@ def _adjust_tosa_aarch64_atol(compile_spec: ArmCompileSpec, atol: float) -> floa
     ):
         return atol * 1.1
     return atol
+
+
+def _direct_backend_lowering_enabled() -> bool:
+    return os.environ.get("ARM_TEST_ENABLE_DIRECT_BACKEND_LOWERING", "0") not in (
+        "",
+        "0",
+        "false",
+        "False",
+    )
+
+
+def _resolve_edge_compile_config(
+    edge_compile_config: Optional[EdgeCompileConfig],
+) -> EdgeCompileConfig:
+    config = edge_compile_config or EdgeCompileConfig(_check_ir_validity=False)
+    if not _direct_backend_lowering_enabled():
+        return config
+    return replace(config, _enable_direct_backend_lowering=True)
 
 
 def _dump_lowered_modules_artifact(
@@ -471,7 +491,7 @@ class ArmTester(tester.Tester):
                 partitioners = [arm_partitioner]
             to_edge_and_lower_stage = ToEdgeTransformAndLower(
                 partitioners,
-                edge_compile_config,
+                _resolve_edge_compile_config(edge_compile_config),
                 constant_methods=self.constant_methods,
                 transform_passes=self.transform_passes,
                 compile_spec=self.compile_spec,
@@ -480,7 +500,9 @@ class ArmTester(tester.Tester):
             if partitioners is not None:
                 to_edge_and_lower_stage.partitioners = partitioners
             if edge_compile_config is not None:
-                to_edge_and_lower_stage.edge_compile_conf = edge_compile_config
+                to_edge_and_lower_stage.edge_compile_conf = _resolve_edge_compile_config(
+                    edge_compile_config
+                )
         return super().to_edge_transform_and_lower(
             to_edge_and_lower_stage, generate_etrecord=generate_etrecord
         )

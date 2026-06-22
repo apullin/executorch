@@ -5,6 +5,7 @@
 
 
 import os
+import shutil
 
 from datetime import datetime
 
@@ -63,6 +64,19 @@ def maybe_get_tosa_collate_path() -> str | None:
     return None
 
 
+def _prepare_custom_artifact_path(custom_path: Optional[str]) -> None:
+    if custom_path is None:
+        return
+
+    # Collated testcases reuse a shared mounted workspace in local Docker runs.
+    # Clear just this test's artifact directory so stale output.tosa files from
+    # earlier runs do not pollute the current expectation checks.
+    if os.environ.get("TOSA_TESTCASES_BASE_PATH"):
+        shutil.rmtree(custom_path, ignore_errors=True)
+
+    os.makedirs(custom_path, exist_ok=True)
+
+
 def get_tosa_compile_spec(
     tosa_spec: str | TosaSpecification,
     custom_path: Optional[str] = None,
@@ -71,8 +85,7 @@ def get_tosa_compile_spec(
     """Get the compile spec for default TOSA tests."""
     if not custom_path:
         custom_path = maybe_get_tosa_collate_path()
-    if custom_path is not None:
-        os.makedirs(custom_path, exist_ok=True)
+    _prepare_custom_artifact_path(custom_path)
 
     compile_spec = (
         TosaCompileSpec(tosa_spec)
@@ -94,8 +107,7 @@ def get_u55_compile_spec(
     """Default compile spec for Ethos-U55 tests."""
     if not custom_path:
         custom_path = maybe_get_tosa_collate_path()
-    if custom_path is not None:
-        os.makedirs(custom_path, exist_ok=True)
+    _prepare_custom_artifact_path(custom_path)
 
     # https://gitlab.arm.com/artificial-intelligence/ethos-u/ethos-u-vela/-/blob/main/OPTIONS.md
     assert macs in [32, 64, 128, 256], "Unsupported MACs value"
@@ -131,8 +143,7 @@ def get_u85_compile_spec(
 
     if not custom_path:
         custom_path = maybe_get_tosa_collate_path()
-    if custom_path is not None:
-        os.makedirs(custom_path, exist_ok=True)
+    _prepare_custom_artifact_path(custom_path)
 
     assert macs in [128, 256, 512, 1024, 2048], "Unsupported MACs value"
 
@@ -176,8 +187,7 @@ def get_vgf_compile_spec(
     if len(profiles) == 0:
         raise ValueError(f"Unsupported vgf compile_spec: {repr(tosa_spec)}")
 
-    if custom_path is not None:
-        os.makedirs(custom_path, exist_ok=True)
+    _prepare_custom_artifact_path(custom_path)
     if compiler_flags is not None:
         compiler_flags_list = compiler_flags.split(" ")
     else:

@@ -7,6 +7,7 @@ import logging
 import os
 import random
 import sys
+from importlib import import_module
 from typing import Any
 
 import pytest
@@ -26,6 +27,49 @@ def pytest_configure(config):
         pytest._test_options["llama_inputs"] = config.option.llama_inputs  # type: ignore[attr-defined]
 
     logging.basicConfig(stream=sys.stdout)
+
+    if os.environ.get("ARM_TEST_ENABLE_ARM_TOSA_ENGINE_PATCH", "0") in (
+        "",
+        "0",
+        "false",
+        "False",
+    ):
+        return
+
+    engine_root = os.environ.get("ARM_TOSA_ENGINE_ROOT")
+    if engine_root and engine_root not in sys.path:
+        sys.path.insert(0, engine_root)
+
+    executorch_src_root = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "..", "src")
+    )
+    if executorch_src_root not in sys.path:
+        sys.path.insert(0, executorch_src_root)
+
+    integration_module_name = os.environ.get(
+        "ARM_TOSA_ENGINE_IMPORT", "fast_preprocess"
+    )
+
+    try:
+        integration_module = import_module(integration_module_name)
+        install = getattr(
+            integration_module,
+            "install",
+            getattr(integration_module, "patch_tosa_backend", None),
+        )
+        if not callable(install):
+            raise AttributeError(
+                f"{integration_module_name} does not expose install() or patch_tosa_backend()"
+            )
+    except (ImportError, AttributeError) as exc:
+        raise RuntimeError(
+            "ARM test lane requested arm-tosa-engine patching, but the "
+            f"integration module '{integration_module_name}' could not be "
+            "loaded. Set ARM_TOSA_ENGINE_ROOT or ARM_TOSA_ENGINE_IMPORT and "
+            "install the arm-tosa-engine package in the active environment."
+        ) from exc
+
+    install()
 
 
 def pytest_collection_modifyitems(config, items):

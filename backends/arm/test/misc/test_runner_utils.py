@@ -6,6 +6,8 @@
 from pathlib import Path
 from typing import Any, cast
 
+import torch
+
 from executorch.backends.arm.test import runner_utils
 
 
@@ -113,3 +115,42 @@ def test_get_elf_path_accepts_nested_runner_output(monkeypatch, tmp_path: Path) 
     monkeypatch.setattr(runner_utils, "_elf_search_roots", lambda: [tmp_path])
 
     assert runner_utils.get_elf_path("corstone-300") == str(elf_path)
+
+
+def test_quantized_decomposed_out_ops_preserve_channels_last_layout() -> None:
+    x = torch.arange(1, 25, dtype=torch.float32).reshape((1, 2, 3, 4))
+    x = x.to(memory_format=torch.channels_last)
+
+    runner_utils._ensure_quantized_out_variant_registered(
+        torch.ops.quantized_decomposed.quantize_per_tensor.default
+    )
+    runner_utils._ensure_quantized_out_variant_registered(
+        torch.ops.quantized_decomposed.dequantize_per_tensor.default
+    )
+
+    q_out = torch.empty_like(x, dtype=torch.int8)
+    quantized = runner_utils._run_quantized_decomposed_out_op(
+        torch.ops.quantized_decomposed.quantize_per_tensor.out,
+        (x, 0.09407360851764679, -128, -128, 127, torch.int8),
+        {"out": q_out},
+    )
+
+    assert quantized.dim_order() == x.dim_order()
+    assert quantized.is_contiguous(memory_format=torch.channels_last)
+
+    dq_out = torch.empty_like(x)
+    dequantized = runner_utils._run_quantized_decomposed_out_op(
+        torch.ops.quantized_decomposed.dequantize_per_tensor.out,
+        (
+            quantized,
+            2.2577226161956787,
+            -128,
+            -128,
+            127,
+            torch.int8,
+        ),
+        {"out": dq_out},
+    )
+
+    assert dequantized.dim_order() == x.dim_order()
+    assert dequantized.is_contiguous(memory_format=torch.channels_last)

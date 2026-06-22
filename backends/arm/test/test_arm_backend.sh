@@ -104,6 +104,34 @@ test_pytest_ops_tosa() {
     echo "${TEST_SUITE_NAME}: PASS"
 }
 
+test_pytest_ops_tosa_direct_lower() {
+    echo "${TEST_SUITE_NAME}: Run quantized pytest ops for TOSA with direct backend lowering"
+
+    # Keep this lane scoped to the quantized surface the direct-lowering path
+    # is intended to replace. Pytest -k is substring-based, so plain `INT`
+    # accidentally pulls in tests like `test_int64_tosa_FP[...]`.
+    direct_lower_k='tosa and not FP and (INT or 16a8w or a16w8 or quantized or qat)'
+
+    ARM_TEST_ENABLE_DIRECT_BACKEND_LOWERING=1 \
+      ARM_TEST_ENABLE_ARM_TOSA_ENGINE_PATCH=1 \
+      ARM_TOSA_ENGINE_SERIALIZER=rust \
+      pytest "${PYTEST_RETRY_ARGS[@]}" --verbose --color=yes --numprocesses=auto --durations=10 \
+      backends/arm/test/ --ignore=backends/arm/test/models -k "${direct_lower_k}"
+    echo "${TEST_SUITE_NAME}: PASS"
+}
+
+test_pytest_ops_tosa_direct_lower_smoke() {
+    echo "${TEST_SUITE_NAME}: Run direct-lowering smoke tests for TOSA"
+
+    ARM_TEST_ENABLE_DIRECT_BACKEND_LOWERING=1 \
+      ARM_TEST_ENABLE_ARM_TOSA_ENGINE_PATCH=1 \
+      ARM_TOSA_ENGINE_SERIALIZER=rust \
+      pytest "${PYTEST_RETRY_ARGS[@]}" --verbose --color=yes --durations=10 --maxfail=1 \
+      backends/arm/test/misc/test_partition_decomposed_quantized_ops.py::test_linear_residual_tosa_INT \
+      backends/arm/test/ops/test_slice.py::test_slice_tensor_16a8w_tosa_INT
+    echo "${TEST_SUITE_NAME}: PASS"
+}
+
 test_pytest_models_tosa() {
     echo "${TEST_SUITE_NAME}: Run pytest models for TOSA"
 

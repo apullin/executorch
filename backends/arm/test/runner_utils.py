@@ -41,6 +41,7 @@ from executorch.backends.arm.vgf.model_converter import (
     model_converter_env,
 )
 from executorch.exir import ExecutorchProgramManager, ExportedProgram
+from executorch.exir.operator.convert import _ensure_quantized_out_variant_registered
 from executorch.exir.lowered_backend_module import LoweredBackendModule
 from torch.fx.node import Node
 
@@ -74,6 +75,76 @@ _torch_to_numpy_dtype_dict = {
 }
 
 VALID_TARGET = {"corstone-300", "corstone-320", "vkml_emulation_layer"}
+
+_QUANTIZED_DECOMPOSED_OUT_OPS: tuple[torch._ops.OpOverload, ...] | None = None
+
+
+def _get_quantized_decomposed_out_ops() -> tuple[torch._ops.OpOverload, ...]:
+    global _QUANTIZED_DECOMPOSED_OUT_OPS
+    if _QUANTIZED_DECOMPOSED_OUT_OPS is not None:
+        return _QUANTIZED_DECOMPOSED_OUT_OPS
+
+    ops: list[torch._ops.OpOverload] = []
+    for opname in (
+        "quantize_per_tensor",
+        "dequantize_per_tensor",
+        "quantize_per_channel",
+        "dequantize_per_channel",
+    ):
+        packet = getattr(torch.ops.quantized_decomposed, opname)
+        default_op = getattr(packet, "default", None)
+        if default_op is not None:
+            _ensure_quantized_out_variant_registered(default_op)
+        out_op = getattr(packet, "out", None)
+        if out_op is not None:
+            ops.append(out_op)
+
+    _QUANTIZED_DECOMPOSED_OUT_OPS = tuple(ops)
+    return _QUANTIZED_DECOMPOSED_OUT_OPS
+
+
+def _channels_last_memory_format_for_dim_order(
+    dim_order: tuple[int, ...],
+) -> torch.memory_format | None:
+    if dim_order == NHWC_ORDER:
+        return torch.channels_last
+    if dim_order == NNHWC_ORDER:
+        return torch.channels_last_3d
+    return None
+
+
+def _run_quantized_decomposed_out_op(
+    func: torch._ops.OpOverload,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> torch.Tensor:
+    packet = getattr(torch.ops.quantized_decomposed, func._schema.name.split("::")[1])
+    functional_op = getattr(packet, "default")
+    functional_kwargs = dict(kwargs)
+    out = functional_kwargs.pop("out")
+    input_tensor = args[0]
+    input_dim_order = input_tensor.dim_order()
+    functional_args = args
+    target_memory_format = _channels_last_memory_format_for_dim_order(input_dim_order)
+
+    # Q/DQ ops do not handle channels-last inputs correctly. Run them in contiguous
+    # format, then materialize the expected layout in the op result. The `out`
+    # tensor often comes from `memory.alloc`, which is contiguous regardless of
+    # the logical dim order, so we cannot assume its layout is already correct.
+    if target_memory_format is not None:
+        functional_args = (
+            input_tensor.to(memory_format=torch.contiguous_format),
+            *args[1:],
+        )
+
+    result = functional_op(*functional_args, **functional_kwargs)
+    if target_memory_format is not None:
+        result = result.to(memory_format=target_memory_format)
+        if out.dim_order() != input_dim_order:
+            out = out.to(memory_format=target_memory_format)
+
+    out.copy_(result)
+    return out
 
 
 class QuantizationParams:
@@ -259,18 +330,8 @@ class TosaReferenceModelDispatch(TorchFunctionMode):
 
         # This is a hack since Q/DQ ops does not handle channels last input correctly: the simplest and most robust
         # workaround is to simply run them in channels first format and then convert back to channels last.
-        if func in (
-            torch.ops.quantized_decomposed.quantize_per_tensor.out,
-            torch.ops.quantized_decomposed.dequantize_per_tensor.out,
-            torch.ops.quantized_decomposed.quantize_per_channel.out,
-            torch.ops.quantized_decomposed.dequantize_per_channel.out,
-        ):
-
-            input_dim_order = args[0].dim_order()
-            if input_dim_order in (NHWC_ORDER, NNHWC_ORDER):
-                args = [args[0].to(memory_format=torch.contiguous_format), *args[1:]]
-                res = func(*args, **kwargs)
-                return res.to(memory_format=torch.channels_last)
+        if func in _get_quantized_decomposed_out_ops():
+            return _run_quantized_decomposed_out_op(func, args, kwargs)
 
         return func(*args, **kwargs)
 
