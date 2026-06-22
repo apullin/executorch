@@ -76,7 +76,7 @@ def test_mixed_type_lowering_tosa_INT_FP():
         ),  # One decomposed boundary DQ nodes + one for SIGMOID
     )
 
-    # The direct-lowering lane (tosater) uses a valid but different quantize
+    # The direct-lowering lane uses a valid but different quantize
     # decomposition, so the exact op-dtype counts differ; this structural guard is for
     # the standard lane. Numerics are still verified by pipeline.run().
     if os.environ.get("ARM_TEST_ENABLE_DIRECT_BACKEND_LOWERING") != "1":

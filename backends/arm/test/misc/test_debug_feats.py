@@ -298,7 +298,7 @@ def test_dump_tosa_debug_tosa_FP(test_data: input_t1):
         tosa_json = dbg_tosa_fb_to_json(f.read())
 
     # Check all non-empty JSON strings are valid. The direct-lowering serializer
-    # (tosater) does not emit per-op source-location debug metadata, so skip the
+    # does not emit per-op source-location debug metadata, so skip the
     # location-JSON check in that lane.
     ops = tosa_json["regions"][0]["blocks"][0]["operators"]
     if os.environ.get("ARM_TEST_ENABLE_DIRECT_BACKEND_LOWERING") != "1":

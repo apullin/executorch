@@ -341,7 +341,7 @@ redundant_xfails_INT = redundant_xfails_FP | {
 }
 
 if os.environ.get("ARM_TEST_ENABLE_DIRECT_BACKEND_LOWERING") == "1":
-    # The direct-lowering lane (tosater) lowers quantized-input redundant casts that the
+    # The direct-lowering lane lowers quantized-input redundant casts that the
     # standard ATen->Edge tracing path cannot, so int8/int16 no longer xfail in either lane.
     redundant_xfails_FP = {}
     redundant_xfails_INT = {"rand_fp16_fp16": "FP16 is not supported"}
