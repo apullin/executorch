@@ -22,11 +22,39 @@ from executorch.backends.arm._passes.insert_table_ops import TableOps
 from executorch.backends.arm._passes.to_tosa_memory_format_pass import (
     ToTosaMemoryFormatPass,
 )
+from executorch.backends.arm.constants import DQ_OPS, Q_OPS
 from executorch.backends.arm.operators.op_permute import transform_permutation_vector
+from executorch.backends.arm.operator_support.target_normalization import target_key
 from executorch.backends.arm.tosa.utils import tosa_shape
 from executorch.exir.backend.utils import WhyNoPartitionReporter
 from executorch.exir.dialects._ops import ops as exir_ops
 from torch.fx.passes.operator_support import OperatorSupportBase
+
+
+_CONVOLUTION_KEY = target_key(exir_ops.edge.aten.convolution.default)
+_PERMUTE_TARGET_KEYS = frozenset(
+    {
+        target_key(exir_ops.edge.aten.permute_copy.default),
+        target_key(torch.ops.aten.permute.default),
+    }
+)
+_VIEW_TARGET_KEYS = frozenset(
+    {
+        target_key(exir_ops.edge.aten.view_copy.default),
+        target_key(exir_ops.edge.aten.select.int),
+        target_key(exir_ops.edge.aten.unsqueeze_copy.default),
+        target_key(exir_ops.edge.aten.squeeze_copy.dims),
+        target_key(exir_ops.edge.aten.select_copy.int),
+        target_key(torch.ops.aten.reshape.default),
+        target_key(torch.ops.aten.flatten.using_ints),
+    }
+)
+_CAST_TARGET_KEYS = frozenset(
+    {
+        target_key(exir_ops.edge.dim_order_ops._to_dim_order_copy.default),
+        target_key(torch.ops.aten._to_copy.default),
+    }
+)
 
 
 def _try_determine_dtype(node: fx.Node) -> torch.dtype | None:
@@ -46,10 +74,13 @@ def _try_determine_dtype(node: fx.Node) -> torch.dtype | None:
     dtype = get_first_fake_tensor(node).dtype
     if not dtype.is_floating_point:
         return dtype
-    if node.target is exir_ops.edge.quantized_decomposed.dequantize_per_tensor.default:
+    if node.target in DQ_OPS:
         return get_first_fake_tensor(node.all_input_nodes[0]).dtype
-    q_node = list(node.users)[0]
-    if q_node.target is exir_ops.edge.quantized_decomposed.quantize_per_tensor.default:
+    users = list(node.users)
+    if len(users) != 1:
+        return None
+    q_node = users[0]
+    if q_node.target in Q_OPS:
         return typing.cast(torch.dtype, q_node.args[-1])
     # We can't easily figure out dtype, return None
     return None
@@ -128,7 +159,7 @@ class EthosU55DtypeSupport(OperatorSupportBase):
                 )
                 return False
 
-        if node.target == exir_ops.edge.aten.convolution.default:
+        if target_key(node.target) == _CONVOLUTION_KEY:
             ifm, weight = node.all_input_nodes[0:2]
             ifm_dtype = _try_determine_dtype(ifm)
             if ifm_dtype is not None and ifm_dtype not in (torch.int8, torch.int16):
@@ -247,7 +278,8 @@ class EthosU55NotSupported(OperatorSupportBase):
             bool: False if ``node.target`` is in ``unsupported_ops``; else True.
 
         """
-        if node.target in self.unsupported_ops:
+        unsupported_target_keys = frozenset(target_key(op) for op in self.unsupported_ops)
+        if target_key(node.target) in unsupported_target_keys:
             self.reporter.report_reject(node, "Op is not supported on U55.")
             return False
 
@@ -501,22 +533,16 @@ class EthosU55ViewCheck(OperatorSupportBase):
         """
         # Select decomposes into squeeze, which in turn becomes a view. Therefore,
         # perform the same check on select operators as view operators.
-        if node.target not in (
-            exir_ops.edge.aten.view_copy.default,
-            exir_ops.edge.aten.select.int,
-            exir_ops.edge.aten.unsqueeze_copy.default,
-            exir_ops.edge.aten.squeeze_copy.dims,
-            exir_ops.edge.aten.select_copy.int,
-        ):
+        if target_key(node.target) not in _VIEW_TARGET_KEYS:
             return True
 
         shape = list(get_first_fake_tensor(node).shape)
         output_rank = len(shape)
         dtype = _try_determine_dtype(node)
 
-        if node.target in (
-            exir_ops.edge.aten.select.int,
-            exir_ops.edge.aten.select_copy.int,
+        if target_key(node.target) in (
+            target_key(exir_ops.edge.aten.select.int),
+            target_key(exir_ops.edge.aten.select_copy.int),
         ):
             # For select, the transpose condition should be applied on the output of the slice
             # which has the same shape as the input except the selected dimension is 1.
@@ -663,7 +689,7 @@ class EthosU55TransposeCheck(OperatorSupportBase):
             bool: True if supported; otherwise, False.
 
         """
-        if not node.target == exir_ops.edge.aten.permute_copy.default:
+        if target_key(node.target) not in _PERMUTE_TARGET_KEYS:
             return True
 
         shape = list(get_first_fake_tensor(node).shape)
@@ -722,10 +748,6 @@ class EthosU55CastCheck(OperatorSupportBase):
 
     """
 
-    targets = [
-        exir_ops.edge.dim_order_ops._to_dim_order_copy.default,
-    ]
-
     def __init__(self, reporter: WhyNoPartitionReporter):
         """Initialize the check with a reporter.
 
@@ -749,7 +771,7 @@ class EthosU55CastCheck(OperatorSupportBase):
             bool: True if supported; otherwise, False.
 
         """
-        if node.target not in self.targets:
+        if target_key(node.target) not in _CAST_TARGET_KEYS:
             return True
         input_dtype = get_first_fake_tensor(node.all_input_nodes[0]).dtype
         output_dtype = get_first_fake_tensor(node).dtype
