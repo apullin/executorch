@@ -985,6 +985,10 @@ if(EXECUTORCH_BUILD_PYBIND)
       torch
   )
 
+  if(TARGET extension_threadpool)
+    list(APPEND _dep_libs extension_threadpool)
+  endif()
+
   # Build common AOTI functionality if needed by CUDA or Metal backends
   if(EXECUTORCH_BUILD_CUDA)
     # CUDA uses SlimTensor-based shims
