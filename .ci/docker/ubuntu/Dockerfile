@@ -55,15 +55,22 @@ COPY ./common/utils.sh utils.sh
 RUN bash ./install_conda.sh && rm install_conda.sh utils.sh /opt/conda/requirements-ci.txt /opt/conda/conda-env-ci.txt
 
 # Install sccache before building torch
+ARG ENABLE_SCCACHE=1
 COPY ./common/install_cache.sh install_cache.sh
 ENV PATH /opt/cache/bin:$PATH
 COPY ./common/utils.sh utils.sh
-RUN bash ./install_cache.sh && rm install_cache.sh utils.sh
+RUN mkdir -p /opt/cache/bin && \
+    if [ "${ENABLE_SCCACHE}" != "0" ]; then bash ./install_cache.sh; fi && \
+    rm install_cache.sh utils.sh
+ARG SCCACHE_DISABLE
+ENV SCCACHE_DISABLE=${SCCACHE_DISABLE}
 ENV SCCACHE_BUCKET ossci-compiler-cache-circleci-v2
 ENV SCCACHE_S3_KEY_PREFIX executorch
 ENV SCCACHE_REGION us-east-1
 ENV AWS_REGION us-east-1
 ENV AWS_DEFAULT_REGION us-east-1
+ENV RUSTUP_HOME=/opt/rustup
+ENV CARGO_HOME=/opt/cargo
 
 ARG TORCH_VERSION
 ARG SKIP_PYTORCH
@@ -96,6 +103,17 @@ COPY ./common/install_zephyr.sh install_zephyr.sh
 COPY ./common/utils.sh utils.sh
 RUN if [ -n "${ZEPHYR_SDK}" ]; then bash ./install_zephyr.sh; fi
 RUN rm install_zephyr.sh utils.sh
+
+ARG INSTALL_RUST
+RUN if [ -n "${INSTALL_RUST}" ]; then \
+    mkdir -p "${RUSTUP_HOME}" "${CARGO_HOME}" && \
+    chmod 755 "${RUSTUP_HOME}" "${CARGO_HOME}" && \
+    curl https://sh.rustup.rs -sSf | env RUSTUP_HOME="${RUSTUP_HOME}" CARGO_HOME="${CARGO_HOME}" bash -s -- -y --profile minimal --default-toolchain stable && \
+    ln -sf "${CARGO_HOME}/bin/cargo" /usr/local/bin/cargo && \
+    ln -sf "${CARGO_HOME}/bin/rustc" /usr/local/bin/rustc && \
+    ln -sf "${CARGO_HOME}/bin/rustup" /usr/local/bin/rustup && \
+    chown -R ci-user:ci-user "${RUSTUP_HOME}" "${CARGO_HOME}"; \
+    fi
 
 ARG QNN_SDK
 

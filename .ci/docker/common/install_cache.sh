@@ -51,7 +51,9 @@ function write_sccache_stub() {
     # For some reason it's very important for the first cached nvcc invocation
     cat >"/opt/cache/bin/$1" <<EOF
 #!/bin/sh
-if [ "\$1" = "-E" ] || [ "\$2" = "-E" ]; then
+if [ -n "\${SCCACHE_DISABLE:-}" ] && [ "\${SCCACHE_DISABLE}" != "0" ]; then
+  exec $(which $1) "\$@"
+elif [ "\$1" = "-E" ] || [ "\$2" = "-E" ]; then
   exec $(which $1) "\$@"
 elif [ \$(env -u LD_PRELOAD ps -p \$PPID -o comm=) != sccache ]; then
   exec sccache $(which $1) "\$@"
@@ -62,7 +64,9 @@ EOF
   else
     cat >"/opt/cache/bin/$1" <<EOF
 #!/bin/sh
-if [ \$(env -u LD_PRELOAD ps -p \$PPID -o comm=) != sccache ]; then
+if [ -n "\${SCCACHE_DISABLE:-}" ] && [ "\${SCCACHE_DISABLE}" != "0" ]; then
+  exec $(which $1) "\$@"
+elif [ \$(env -u LD_PRELOAD ps -p \$PPID -o comm=) != sccache ]; then
   exec sccache $(which $1) "\$@"
 else
   exec $(which $1) "\$@"
