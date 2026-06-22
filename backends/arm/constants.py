@@ -5,11 +5,14 @@
 
 from typing import Any, cast, Final
 
+import torch
+
 from executorch.exir.dialects._ops import ops as exir_ops
 
 exir_ops = cast(Any, exir_ops)
 
 qd = exir_ops.edge.quantized_decomposed
+raw_qd = torch.ops.quantized_decomposed
 
 QUANT_PER_TENSOR_OP: Final = qd.quantize_per_tensor.default
 QUANT_PER_TENSOR_OP_T: Final = qd.quantize_per_tensor.tensor
@@ -19,16 +22,47 @@ DEQUANT_PER_TENSOR_OP: Final = qd.dequantize_per_tensor.default
 DEQUANT_PER_TENSOR_OP_T: Final = qd.dequantize_per_tensor.tensor
 DEQUANT_PER_CHANNEL_OP: Final = qd.dequantize_per_channel.default
 
-Q_OPS: Final = (QUANT_PER_TENSOR_OP, QUANT_PER_TENSOR_OP_T, QUANT_PER_CHANNEL_OP)
-DQ_OPS: Final = (DEQUANT_PER_TENSOR_OP, DEQUANT_PER_TENSOR_OP_T, DEQUANT_PER_CHANNEL_OP)
+RAW_QUANT_PER_TENSOR_OP: Final = raw_qd.quantize_per_tensor.default
+RAW_QUANT_PER_TENSOR_OP_T: Final = raw_qd.quantize_per_tensor.tensor
+RAW_QUANT_PER_CHANNEL_OP: Final = raw_qd.quantize_per_channel.default
+
+RAW_DEQUANT_PER_TENSOR_OP: Final = raw_qd.dequantize_per_tensor.default
+RAW_DEQUANT_PER_TENSOR_OP_T: Final = raw_qd.dequantize_per_tensor.tensor
+RAW_DEQUANT_PER_CHANNEL_OP: Final = raw_qd.dequantize_per_channel.default
+
+Q_OPS: Final = (
+    QUANT_PER_TENSOR_OP,
+    QUANT_PER_TENSOR_OP_T,
+    QUANT_PER_CHANNEL_OP,
+    RAW_QUANT_PER_TENSOR_OP,
+    RAW_QUANT_PER_TENSOR_OP_T,
+    RAW_QUANT_PER_CHANNEL_OP,
+)
+DQ_OPS: Final = (
+    DEQUANT_PER_TENSOR_OP,
+    DEQUANT_PER_TENSOR_OP_T,
+    DEQUANT_PER_CHANNEL_OP,
+    RAW_DEQUANT_PER_TENSOR_OP,
+    RAW_DEQUANT_PER_TENSOR_OP_T,
+    RAW_DEQUANT_PER_CHANNEL_OP,
+)
 
 PER_TENSOR_QDQ_OPS: Final = (
     QUANT_PER_TENSOR_OP,
     QUANT_PER_TENSOR_OP_T,
     DEQUANT_PER_TENSOR_OP,
     DEQUANT_PER_TENSOR_OP_T,
+    RAW_QUANT_PER_TENSOR_OP,
+    RAW_QUANT_PER_TENSOR_OP_T,
+    RAW_DEQUANT_PER_TENSOR_OP,
+    RAW_DEQUANT_PER_TENSOR_OP_T,
 )
-PER_CHANNEL_QDQ_OPS: Final = (QUANT_PER_CHANNEL_OP, DEQUANT_PER_CHANNEL_OP)
+PER_CHANNEL_QDQ_OPS: Final = (
+    QUANT_PER_CHANNEL_OP,
+    DEQUANT_PER_CHANNEL_OP,
+    RAW_QUANT_PER_CHANNEL_OP,
+    RAW_DEQUANT_PER_CHANNEL_OP,
+)
 
 NHWC_ORDER: Final = (0, 2, 3, 1)
 NHWC_INVERSE_ORDER: Final = (0, 3, 1, 2)

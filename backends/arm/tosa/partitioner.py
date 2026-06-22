@@ -15,9 +15,10 @@ be delegated to the TOSA backend. Use this module to:
 
 import logging
 import operator
+import os
 from itertools import count
 from pathlib import Path
-from typing import Callable, cast, List, Optional, Sequence, Tuple
+from typing import Callable, cast, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
 import torch
 from executorch.backends.arm._passes.arm_pass_utils import (
@@ -30,6 +31,7 @@ from executorch.backends.arm._passes.convert_expand_copy_to_repeat import (
 
 from executorch.backends.arm.common.type import ensure_type
 from executorch.backends.arm.constants import DQ_OPS, Q_OPS
+from executorch.backends.arm.operator_support.target_normalization import target_key
 from executorch.backends.arm.operator_support.tosa_supported_operators import (
     tosa_support_factory,
 )
@@ -37,15 +39,29 @@ from executorch.backends.arm.tosa.backend import TOSABackend
 from executorch.backends.arm.tosa.compile_spec import TosaCompileSpec
 from executorch.exir.backend.partitioner import (
     DelegationSpec,
+    DirectLoweringResult,
     Partitioner,
     PartitionResult,
 )
+from executorch.exir.backend.backend_api import to_backend
 from executorch.exir.backend.utils import tag_constant_data, WhyNoPartitionReporter
+from executorch.exir.delegate import executorch_call_delegate
 from executorch.exir.dialects._ops import ops as exir_ops
+from executorch.exir.pass_base import ExportPass, ProxyValue
+from executorch.exir.passes import OpReplacePass, base_pre_op_replace_passes
+from executorch.exir.passes.memory_format_ops_pass import MemoryFormatOpsPass
+from executorch.exir.passes.remove_mixed_type_operators import RemoveMixedTypeOperators
+from executorch.exir.passes.replace_view_ops_with_view_copy_ops_pass import (
+    ReplaceViewOpsWithViewCopyOpsPass,
+)
+from executorch.exir.verification.verifier import EXIREdgeDialectVerifier
 from torch.export.exported_program import ExportedProgram
 from torch.fx import GraphModule
 from torch.fx.passes.infra.partitioner import CapabilityBasedPartitioner, Partition
 from torch.fx.passes.operator_support import any_chain, OperatorSupportBase
+
+if TYPE_CHECKING:
+    from executorch.exir.capture import EdgeCompileConfig
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +77,77 @@ def _is_custom_partition_op(
         except Exception:
             return False
     return False
+
+
+def _direct_lower_node_limit() -> int:
+    raw = os.environ.get("ET_ARM_TOSA_DIRECT_LOWER_NODE_LIMIT")
+    if raw is None:
+        raw = os.environ.get("ARM_TOSA_ENGINE_DIRECT_LOWER_NODE_LIMIT")
+    if raw is None:
+        return 128
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning(
+            "Ignoring invalid direct-lower node limit %r; using default 128.", raw
+        )
+        return 128
+
+
+def _graph_node_count(program: ExportedProgram) -> int:
+    return sum(1 for _ in program.graph.nodes)
+
+
+class DecomposeTypeAsPass(ExportPass):
+    """Decompose `aten.type_as(self, other)` into a dtype cast.
+
+    type_as is CompositeImplicitAutograd; stock lowering decomposes it via the
+    default table inside `_generate_edge_program()`. The direct-lowering seam
+    bypasses that, so an undelegated type_as reaches `to_executorch()` with no
+    out variant. Rewrite it to `self.to(other.dtype)` the way stock does.
+    """
+
+    def call_operator(self, op, args, kwargs, meta):  # pyre-ignore
+        if op != torch.ops.aten.type_as.default or len(args) < 2:
+            return super().call_operator(op, args, kwargs, meta)
+        src, other = args[0], args[1]
+        if not (isinstance(other, ProxyValue) and other.is_tensor()):
+            return super().call_operator(op, args, kwargs, meta)
+        target_dtype = other.to_tensor().dtype
+        if (
+            isinstance(src, ProxyValue)
+            and src.is_tensor()
+            and src.to_tensor().dtype == target_dtype
+        ):
+            return src
+        return super().call_operator(
+            torch.ops.aten._to_copy.default,
+            (src,),
+            {"dtype": target_dtype},
+            meta,
+        )
+
+
+def _direct_lowering_edge_legalization_passes(
+    compile_config: "EdgeCompileConfig",
+) -> tuple[Callable[[torch.nn.Module], object], ...]:
+    """Mirror the essential ATen->Edge legalization steps after direct lowering.
+
+    The direct-lowering seam bypasses `_generate_edge_program()`, so replay the
+    same cleanup needed to turn leftover raw ATen view/layout ops into normal
+    Edge-dialect forms before `.to_executorch()` runs.
+    """
+
+    passes: list[Callable[[torch.nn.Module], object]] = [
+        DecomposeTypeAsPass(),
+        *base_pre_op_replace_passes,
+        ReplaceViewOpsWithViewCopyOpsPass(),
+        RemoveMixedTypeOperators(),
+        OpReplacePass(),
+    ]
+    if not compile_config._skip_dim_order:
+        passes.append(MemoryFormatOpsPass())
+    return tuple(passes)
 
 
 def _is_noop_clone(node: torch.fx.node.Node) -> bool:
@@ -97,7 +184,7 @@ def _is_noop_to_dim_order_copy(node: torch.fx.node.Node) -> bool:
 
 
 def _is_noop_expand(node: torch.fx.node.Node) -> bool:
-    if node.target != exir_ops.edge.aten.expand_copy.default:
+    if target_key(node.target) != target_key(exir_ops.edge.aten.expand_copy.default):
         return False
     else:
         multiples, changes_rank = calculate_multiples(node.args)
@@ -114,7 +201,57 @@ def _is_noop_squeeze(node: torch.fx.Node) -> bool:
 
 
 def _is_view_copy(node: torch.fx.node.Node) -> bool:
-    return node.target == exir_ops.edge.aten.view_copy.default
+    return target_key(node.target) in {
+        target_key(exir_ops.edge.aten.view_copy.default),
+        target_key(torch.ops.aten.reshape.default),
+        target_key(torch.ops.aten.flatten.using_ints),
+    }
+
+
+def _contains_raw_quantized_decomposed_op(program: ExportedProgram) -> bool:
+    for node in program.graph.nodes:
+        if getattr(node.target, "namespace", None) == "quantized_decomposed":
+            return True
+    return False
+
+
+def _contains_delegate_call(program: ExportedProgram) -> bool:
+    for node in program.graph.nodes:
+        if node.op == "call_function" and node.target == executorch_call_delegate:
+            return True
+    return False
+
+
+def _count_delegate_calls(program: ExportedProgram) -> int:
+    return sum(
+        1
+        for node in program.graph.nodes
+        if node.op == "call_function" and node.target == executorch_call_delegate
+    )
+
+
+def _contains_raw_convolution(program: ExportedProgram) -> bool:
+    for node in program.graph.nodes:
+        if node.op != "call_function":
+            continue
+        name = node.target.name() if hasattr(node.target, "name") else str(node.target)
+        if name.startswith(("aten::conv1d", "aten::conv2d", "aten::conv3d")):
+            return True
+    return False
+
+
+def _contains_raw_softplus(program: ExportedProgram) -> bool:
+    for node in program.graph.nodes:
+        if node.op != "call_function":
+            continue
+        name = node.target.name() if hasattr(node.target, "name") else str(node.target)
+        if name.startswith("aten::softplus"):
+            return True
+    return False
+
+
+def _contains_control_flow(program: ExportedProgram) -> bool:
+    return any(get_cond_while_submodules_nested(program.graph_module))
 
 
 def is_partitioned(
@@ -194,6 +331,69 @@ class TOSAPartitioner(Partitioner):
         partitioner.
         """
         self._custom_partition_ops.add(op)
+
+    def direct_lower(
+        self,
+        exported_program: ExportedProgram,
+        compile_config: "EdgeCompileConfig",
+    ) -> Optional[DirectLoweringResult]:
+        """Lower a quantized ATen program directly to a delegated graph.
+
+        This is intentionally conservative:
+        - only integer-capable TOSA targets are considered
+        - only raw quantized-decomposed graphs opt in
+        - the delegated outer graph is legalized back to Edge dialect before
+          ExecuTorch wraps it in an EdgeProgramManager
+        """
+        if not self.tosa_spec.support_integer():
+            return None
+        if not compile_config._use_edge_ops:
+            return None
+        if not _contains_raw_quantized_decomposed_op(exported_program):
+            return None
+        if _contains_control_flow(exported_program):
+            # cond/while submodules are mishandled by direct lowering; fall back to the
+            # standard path which lowers control flow correctly.
+            return None
+        if _contains_raw_softplus(exported_program):
+            # softplus decomposes to unquantized ops that the direct lane would leave raw on
+            # the CPU graph; the standard path decomposes it so they are rejected as expected.
+            return None
+        node_limit = _direct_lower_node_limit()
+        if node_limit > 0 and _graph_node_count(exported_program) > node_limit:
+            return None
+
+        try:
+            direct_program = to_backend(exported_program, self)
+        except Exception as e:
+            logging.debug(
+                "Direct lowering failed (%s); falling back to standard lowering.", e
+            )
+            return None
+        if not _contains_delegate_call(direct_program):
+            return None
+        if _contains_raw_convolution(direct_program):
+            # A raw convNd left undelegated on CPU (e.g. conv preceded by a delegated
+            # non-constant pad) has no out variant and cannot be functionalized. Fall back
+            # to standard lowering, which decomposes it to aten.convolution.
+            return None
+        if _count_delegate_calls(direct_program) > 1:
+            # The direct lane is a single-delegate fast path; if lowering fragmented into
+            # multiple delegates (e.g. unfused view ops between matmuls), defer to standard
+            # lowering, which fuses them into one delegate.
+            return None
+        return DirectLoweringResult(
+            exported_program=direct_program,
+            post_lowering_passes=_direct_lowering_edge_legalization_passes(
+                compile_config
+            ),
+            override_verifiers=[
+                EXIREdgeDialectVerifier(
+                    edge_compile_config=compile_config,
+                    class_only=True,
+                )
+            ],
+        )
 
     def _detag_boundary_nodes(
         self,

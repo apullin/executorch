@@ -36,6 +36,7 @@ tokenizer.json
 *.ptd
 !test_bpe_tokenizer.bin
 !test_tiktoken_tokenizer.model
+llama_tosa_*/
 
 # Editor temporaries
 *.idea

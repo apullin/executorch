@@ -18,6 +18,7 @@ from executorch.backends.arm._passes.arm_pass_utils import (
     get_first_fake_tensor,
 )
 from executorch.backends.arm._passes.quant_args import QuantArgs
+from executorch.backends.arm.operator_support.target_normalization import target_key
 from executorch.backends.arm.operator_support.tosa_supported_operators import (
     register_tosa_support_check,
     SupportedTOSAOperatorCheck,
@@ -27,11 +28,52 @@ from executorch.backends.arm.tosa import TosaSpecification
 from executorch.exir.dialects._ops import ops as exir_ops
 
 
+_RAW_CONV2D_KEY = target_key(torch.ops.aten.conv2d.default)
+
+
 @register_tosa_support_check
 class ConvolutionSupported(SupportedTOSAOperatorCheck):
     """Provide TOSA support check for convolutions."""
 
     targets = [exir_ops.edge.aten.convolution.default]
+
+    @staticmethod
+    def _is_raw_conv2d(node: fx.Node) -> bool:
+        return target_key(node.target) == _RAW_CONV2D_KEY
+
+    def _is_transposed(self, node: fx.Node) -> bool:
+        if self._is_raw_conv2d(node):
+            return False
+        return cast(bool, node.args[6])
+
+    def _output_padding(self, node: fx.Node) -> list[int]:
+        if self._is_raw_conv2d(node):
+            return [0, 0]
+        return cast(list[int], node.args[7])
+
+    def _groups(self, node: fx.Node) -> int:
+        if self._is_raw_conv2d(node):
+            if len(node.args) > 6:
+                return cast(int, node.args[6])
+            return cast(int, node.kwargs.get("groups", 1))
+        return cast(int, node.args[8])
+
+    def _strides(self, node: fx.Node) -> list[int]:
+        if len(node.args) > 3:
+            return cast(list[int], node.args[3])
+        return cast(list[int], node.kwargs.get("stride", [1, 1]))
+
+    def _padding(self, node: fx.Node) -> list[int]:
+        if len(node.args) > 4:
+            return cast(list[int], node.args[4])
+        return cast(list[int], node.kwargs.get("padding", [0, 0]))
+
+    def _dilations(self, node: fx.Node) -> list[int]:
+        if self._is_raw_conv2d(node):
+            if len(node.args) > 5:
+                return cast(list[int], node.args[5])
+            return cast(list[int], node.kwargs.get("dilation", [1, 1]))
+        return cast(list[int], node.args[5])
 
     def is_node_tosa_supported(
         self, node: fx.Node, tosa_spec: TosaSpecification
@@ -42,9 +84,9 @@ class ConvolutionSupported(SupportedTOSAOperatorCheck):
         padding. Apply additional hardware-specific constraints for U55.
 
         """
-        transposed = cast(bool, node.args[6])
-        output_padding = cast(list[int], node.args[7])
-        groups = cast(int, node.args[8])
+        transposed = self._is_transposed(node)
+        output_padding = self._output_padding(node)
+        groups = self._groups(node)
 
         if transposed:
             if not self._check_transposed_support(node, groups, output_padding):
@@ -89,14 +131,14 @@ class ConvolutionSupported(SupportedTOSAOperatorCheck):
                     "quantization are not supported.",
                 )
                 return False
-            dilation = expand_around_channel(cast(list[int], node.args[5]), 2)
+            dilation = expand_around_channel(self._dilations(node), 2)
             if any(d != 1 for d in dilation):
                 self.reporter.report_reject(
                     node, "Transpose convolutions with dilation are not supported."
                 )
                 return False
 
-        pad = expand_around_channel(cast(list[int], node.args[4]), 2)
+        pad = expand_around_channel(self._padding(node), 2)
         out_pad = expand_around_channel(output_padding, 2)
         weight_shape = get_first_fake_tensor(cast(fx.Node, node.args[1])).shape
         if len(weight_shape) != 4:
@@ -189,7 +231,7 @@ class ConvolutionSupported(SupportedTOSAOperatorCheck):
         return True
 
     def _is_node_supported_u55(self, node: fx.Node) -> bool:
-        """Enforce Ethos-U55-specific constraints (Vela 5.0.0).
+        """Enforce Ethos-U55-specific constraints (Vela 5.1.0).
 
         Check channel dimensions, kernel sizes, and stride/pad/dilation
         combinations permitted on U55.
@@ -201,14 +243,14 @@ class ConvolutionSupported(SupportedTOSAOperatorCheck):
             bool: True if supported; otherwise, False.
 
         """
-        transposed = cast(bool, node.args[6])
+        transposed = self._is_transposed(node)
         if transposed:
             return self._check_transposed_conv_u55(node)
 
         shape_in = cast(torch.Tensor, node.all_input_nodes[0].meta["val"]).shape
         shape_out = node.meta["val"].shape
         kernel = cast(fx.Node, node.args[1]).meta["val"].shape
-        group = cast(int, node.args[8])
+        group = self._groups(node)
 
         C_in = shape_in[1]
         C_out = shape_out[1]
@@ -266,9 +308,9 @@ class ConvolutionSupported(SupportedTOSAOperatorCheck):
             bool: True if the condition is satisfied.
 
         """
-        strides = cast(list[int], node.args[3])
-        has_padding = any(pad > 0 for pad in cast(list[int], node.args[4]))
-        dilations = cast(list[int], node.args[5])
+        strides = self._strides(node)
+        has_padding = any(pad > 0 for pad in self._padding(node))
+        dilations = self._dilations(node)
         if len(dilations) == 1:
             dilations = [dilations[0]] * 2
         if len(strides) == 1:

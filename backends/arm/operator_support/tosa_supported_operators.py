@@ -24,10 +24,8 @@ from executorch.backends.arm._passes.arm_pass_utils import (
 from executorch.backends.arm._passes.fuse_constant_ops_pass import (
     ComputeConstantOpsAOTPass,
 )
-from executorch.backends.arm._passes.fuse_quantized_activation_pass import (
-    FuseQuantizedActivationPass,
-)
 from executorch.backends.arm._passes.insert_table_ops import TableOps
+from executorch.backends.arm._passes.quant_args import QuantArgs
 from executorch.backends.arm.common.annotation_meta import ArmAnnotationInfo
 from executorch.backends.arm.constants import DQ_OPS, MAX_RANK, Q_OPS
 from executorch.backends.arm.operator_support.control_flow_support import (
@@ -38,6 +36,10 @@ from executorch.backends.arm.operator_support.ethos_u55_support import (
     EthosU55CastCheck,
     EthosU55DtypeSupport,
     EthosU55NotSupported,
+)
+from executorch.backends.arm.operator_support.target_normalization import (
+    target_key,
+    target_keys as _target_keys,
 )
 from executorch.backends.arm.operator_support.tosa_profile_supported_op_lists import (
     TOSA_PRO_FP_SupportList,
@@ -54,6 +56,40 @@ from executorch.exir.dialects._ops import ops as exir_ops
 from torch._subclasses.fake_tensor import FakeTensor
 from torch.export.graph_signature import InputKind
 from torch.fx.passes.operator_support import any_chain, chain, OperatorSupportBase
+
+
+_TOSA_PRO_INT_SUPPORT_KEYS = _target_keys(tuple(TOSA_PRO_INT_SupportList))
+_TOSA_PRO_FP_SUPPORT_KEYS = _target_keys(tuple(TOSA_PRO_FP_SupportList))
+_COMPUTE_CONSTANT_OP_KEYS = _target_keys(tuple(ComputeConstantOpsAOTPass.targeted_ops))
+_QUANTIZED_CONSTANT_OP_KEYS = _target_keys(
+    (exir_ops.edge.aten.full_like.default, *ComputeConstantOpsAOTPass.targeted_ops)
+)
+_TO_DIM_ORDER_COPY_KEY = target_key(exir_ops.edge.dim_order_ops._to_dim_order_copy.default)
+_CONVOLUTION_KEY = target_key(exir_ops.edge.aten.convolution.default)
+_LINEAR_KEY = target_key(exir_ops.edge.aten.linear.default)
+_RELU_KEY = target_key(exir_ops.edge.aten.relu.default)
+_HARDTANH_KEY = target_key(exir_ops.edge.aten.hardtanh.default)
+
+
+def _is_fuseable_input(node: fx.Node) -> bool:
+    return target_key(node.target) in (_CONVOLUTION_KEY, _LINEAR_KEY) and len(node.users) == 1
+
+
+def _is_fuseable_quantized_activation(node: fx.Node) -> bool:
+    is_fuseable = target_key(node.target) == _RELU_KEY
+    if target_key(node.target) == _HARDTANH_KEY:
+        min_val = node.args[1]
+        is_fuseable = min_val == 0
+
+    is_quantized = len(node.users) == 1 and next(iter(node.users)).target in Q_OPS
+    if not (is_fuseable and is_quantized):
+        return False
+
+    quant_node = next(iter(node.users))
+    quant_args = QuantArgs.from_operator(quant_node.target, quant_node.args)
+    zp = quant_args.zp
+    qmin = quant_args.qmin
+    return zp == qmin
 
 
 class SupportedTOSAOperatorCheck(OperatorSupportBase):
@@ -100,9 +136,17 @@ class SupportedTOSAOperatorCheck(OperatorSupportBase):
             bool: True if both the target and TOSA-specific checks pass.
 
         """
-        if node.target not in self.targets:
+        if target_key(node.target) not in self.supported_target_keys():
             return False
         return self.is_node_tosa_supported(node, self.tosa_spec)
+
+    @classmethod
+    def supported_target_keys(cls) -> frozenset[str]:
+        keys = getattr(cls, "_supported_target_keys", None)
+        if keys is None:
+            keys = _target_keys(tuple(cls.targets))
+            cls._supported_target_keys = keys
+        return keys
 
     def is_node_tosa_supported(
         self, node: fx.Node, tosa_spec: TosaSpecification
@@ -147,10 +191,7 @@ def _is_integer_dtype(dtype: torch.dtype) -> bool:
 
 
 def _is_quantized_constant(node: torch.fx.Node) -> bool:
-    if node.target not in (
-        exir_ops.edge.aten.full_like.default,
-        *ComputeConstantOpsAOTPass.targeted_ops,
-    ):
+    if target_key(node.target) not in _QUANTIZED_CONSTANT_OP_KEYS:
         return False
 
     users = tuple(node.users)
@@ -159,7 +200,7 @@ def _is_quantized_constant(node: torch.fx.Node) -> bool:
         return True
 
     for user in users:
-        if user.target == exir_ops.edge.dim_order_ops._to_dim_order_copy.default:
+        if target_key(user.target) == _TO_DIM_ORDER_COPY_KEY:
             dim_order_dtype = get_first_fake_tensor(user).dtype
             if not _is_integer_dtype(dim_order_dtype):
                 return False
@@ -404,7 +445,7 @@ class TOSAProINTSupportList(OperatorSupportBase):
         self, submodules: typing.Mapping[str, torch.nn.Module], node: fx.Node
     ) -> bool:
         """Return True if the node is in the INT profile support list."""
-        return node.op == "call_function" and node.target in TOSA_PRO_INT_SupportList
+        return node.op == "call_function" and target_key(node.target) in _TOSA_PRO_INT_SUPPORT_KEYS
 
 
 class TOSAProFPSupportList(OperatorSupportBase):
@@ -419,7 +460,7 @@ class TOSAProFPSupportList(OperatorSupportBase):
         self, submodules: typing.Mapping[str, torch.nn.Module], node: fx.Node
     ) -> bool:
         """Return True if the node is in the FP profile support list."""
-        return node.op == "call_function" and node.target in TOSA_PRO_FP_SupportList
+        return node.op == "call_function" and target_key(node.target) in _TOSA_PRO_FP_SUPPORT_KEYS
 
 
 class TOSAProINTFPSupportList(OperatorSupportBase):
@@ -436,11 +477,11 @@ class TOSAProINTFPSupportList(OperatorSupportBase):
 
         # Select list based on whether the node is quantized.
         if is_quantized(node) or node.target in (*Q_OPS, *DQ_OPS):
-            support_list = TOSA_PRO_INT_SupportList
+            support_list = _TOSA_PRO_INT_SUPPORT_KEYS
         else:
-            support_list = TOSA_PRO_FP_SupportList
+            support_list = _TOSA_PRO_FP_SUPPORT_KEYS
 
-        return node.target in support_list
+        return target_key(node.target) in support_list
 
 
 class CheckArmQuantized(OperatorSupportBase):
@@ -486,11 +527,13 @@ class CheckProperQuantization(OperatorSupportBase):
         exir_ops.edge.aten.full_like.default,
         exir_ops.edge.aten.hardtanh.default,
         exir_ops.edge.aten.linear.default,
+        exir_ops.edge.aten.max_pool2d.default,
         exir_ops.edge.aten.max_pool2d_with_indices.default,
         exir_ops.edge.aten.mm.default,
         exir_ops.edge.aten.mul.Tensor,
         exir_ops.edge.aten.neg.default,
         exir_ops.edge.aten.relu.default,
+        exir_ops.edge.aten.sum.dim_IntList,
         exir_ops.edge.aten.sub.Tensor,
         exir_ops.edge.aten.upsample_bilinear2d.vec,
         exir_ops.edge.aten.upsample_nearest2d.vec,
@@ -512,27 +555,35 @@ class CheckProperQuantization(OperatorSupportBase):
         and outputs.
 
         """
+        node_key = target_key(node.target)
+        max_pool_key = target_key(exir_ops.edge.aten.max_pool2d.default)
+        max_pool_with_indices_key = target_key(
+            exir_ops.edge.aten.max_pool2d_with_indices.default
+        )
+        targeted_ops = _target_keys(self.targeted_ops)
         output_quantized = False
         input_quantized = False
-        if node.target not in self.targeted_ops:
+        if node_key not in targeted_ops:
             return True
 
-        elif node.target in (exir_ops.edge.aten.max_pool2d_with_indices.default,):
+        elif node_key == max_pool_with_indices_key:
             users = node.users
             output_quantized = all(
                 user.target == operator.getitem
                 and all(user_user.target in Q_OPS for user_user in user.users)
                 for user in users
             )
-        elif FuseQuantizedActivationPass._is_fuseable_input(node):
+        elif node_key == max_pool_key:
+            output_quantized = all(output_node.target in Q_OPS for output_node in node.users)
+        elif _is_fuseable_input(node):
             users = node.users
             output_quantized = all(
-                FuseQuantizedActivationPass._is_fuseable_quantized_activation(user)
+                _is_fuseable_quantized_activation(user)
                 for user in users
             )
-        elif FuseQuantizedActivationPass._is_fuseable_quantized_activation(node):
+        elif _is_fuseable_quantized_activation(node):
             input_node = node.all_input_nodes[0]
-            input_quantized = FuseQuantizedActivationPass._is_fuseable_input(input_node)
+            input_quantized = _is_fuseable_input(input_node)
 
         input_quantized = input_quantized or all(
             (input_node.target in DQ_OPS)
@@ -610,7 +661,7 @@ class CheckInt64InputsAndOutputs(OperatorSupportBase):
                 for output_node in node.users
             )
             if (
-                node.target in ComputeConstantOpsAOTPass.targeted_ops
+                target_key(node.target) in _COMPUTE_CONSTANT_OP_KEYS
                 and users_output_non_int64
             ):
                 if not self.inside_int32_bounds(node):
@@ -652,7 +703,7 @@ class CheckInt64InputsAndOutputs(OperatorSupportBase):
                 continue
             # Constant operator
             if input_node.op == "call_function":
-                if input_node.target in ComputeConstantOpsAOTPass.targeted_ops:
+                if target_key(input_node.target) in _COMPUTE_CONSTANT_OP_KEYS:
                     # This is not perfect since the input_node can still be rejected by other checks but
                     # this should cover the majority of cases.
                     if self.is_node_supported({}, input_node):

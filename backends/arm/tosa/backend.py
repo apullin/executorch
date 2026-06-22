@@ -17,7 +17,7 @@ subsequent stages (for example, JIT or hardware-specific compilers) consume.
 
 import logging
 from itertools import count
-from typing import cast, Dict, final, List
+from typing import Callable, cast, Dict, final, List
 
 import torch
 
@@ -43,6 +43,10 @@ from torch.fx import Graph, GraphModule, Node
 
 # TOSA backend debug functionality
 logger = logging.getLogger(__name__)
+
+TosaPreprocessOverride = Callable[
+    [ExportedProgram, TosaCompileSpec], PreprocessResult
+]
 
 
 def _annotate_external_ids(ep_graph: Graph) -> Dict[str, int]:
@@ -151,6 +155,30 @@ class TOSABackend(BackendDetails):
 
     """
 
+    _preprocess_override: TosaPreprocessOverride | None = None
+
+    @classmethod
+    def set_preprocess_override(
+        cls, preprocess_override: TosaPreprocessOverride | None
+    ) -> None:
+        """Install an optional preprocess implementation override.
+
+        External integrations may use this to replace only the TOSA flatbuffer
+        generation stage while leaving the normal ExecuTorch backend entry
+        points intact.
+        """
+        cls._preprocess_override = preprocess_override
+
+    @classmethod
+    def clear_preprocess_override(cls) -> None:
+        """Remove any installed preprocess override."""
+        cls._preprocess_override = None
+
+    @classmethod
+    def get_preprocess_override(cls) -> TosaPreprocessOverride | None:
+        """Return the active preprocess override, if present."""
+        return cls._preprocess_override
+
     @staticmethod
     def preprocess(edge_program: ExportedProgram, compile_specs: List[CompileSpec]):
         """Convert an exported program using the provided compile specs.
@@ -198,6 +226,10 @@ class TOSABackend(BackendDetails):
             RuntimeError: If an unsupported FX node type is encountered.
 
         """
+        preprocess_override = TOSABackend.get_preprocess_override()
+        if preprocess_override is not None:
+            return preprocess_override(edge_program, compile_spec)
+
         # if a debug/test build capture output files from TOSA stage
         artifact_path = compile_spec._get_intermediate_path()
         tosa_spec = compile_spec.tosa_spec

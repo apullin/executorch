@@ -46,7 +46,14 @@ class ReplaceScalarWithTensorArgPass(ExportPass):
             self.scalar_to_tensor_ops = self.default_ops
         super().__init__()
 
+    @staticmethod
+    def _tensor_value(value):
+        if hasattr(value, "to_tensor"):
+            return value.to_tensor()
+        return value
+
     def get_replacement(self, op, args, kwargs, meta):
+        tensor_value = self._tensor_value(args[0])
         if isinstance(op, OpOverload):
             full_op = torch.ops.aten.full.default
         else:
@@ -66,8 +73,8 @@ class ReplaceScalarWithTensorArgPass(ExportPass):
                         float(args[1]),
                     ),
                     kwargs={
-                        "dtype": args[0].to_tensor().dtype,
-                        "device": args[0].to_tensor().device,
+                        "dtype": tensor_value.dtype,
+                        "device": tensor_value.device,
                     },
                     meta=meta,
                 ),
