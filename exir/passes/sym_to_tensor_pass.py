@@ -9,9 +9,18 @@
 from typing import Union
 
 import torch
-from executorch.exir.pass_base import ExportPass, map_args, NodeMetadata, ProxyValue
+from executorch.exir.pass_base import (
+    ExportPass,
+    map_args,
+    NodeMetadata,
+    PassResult,
+    ProxyValue,
+)
 from torch import SymBool, SymFloat, SymInt
-from torch.utils._pytree import PyTree
+from torch.utils._pytree import PyTree, tree_flatten
+
+
+_SYM_TYPES = {SymInt, SymFloat, SymBool}
 
 
 class SymToTensorPass(ExportPass):
@@ -22,6 +31,36 @@ class SymToTensorPass(ExportPass):
     torch.ops.aten.scalar_tensor.default operator before these SymInts are used
     so that it matches the schema of the operator.
     """
+
+    @staticmethod
+    def _contains_symbolic_value(value: object) -> bool:
+        if type(value) in _SYM_TYPES:
+            return True
+        if isinstance(value, ProxyValue):
+            return type(value.data) in _SYM_TYPES
+        if isinstance(value, torch.fx.Node):
+            return SymToTensorPass._contains_symbolic_value(value.meta.get("val"))
+
+        shape = getattr(value, "shape", None)
+        if shape is not None:
+            try:
+                return any(type(dim) in _SYM_TYPES for dim in shape)
+            except TypeError:
+                return False
+        return False
+
+    @staticmethod
+    def _has_symbolic_candidate(graph_module: torch.fx.GraphModule) -> bool:
+        for module in graph_module.modules():
+            if not isinstance(module, torch.fx.GraphModule):
+                continue
+            for node in module.graph.nodes:
+                leaves, _ = tree_flatten((node.args, node.kwargs, node.meta.get("val")))
+                if any(
+                    SymToTensorPass._contains_symbolic_value(leaf) for leaf in leaves
+                ):
+                    return True
+        return False
 
     # pyre-ignore
     def call_operator(self, op, args, kwargs, meta: NodeMetadata):
@@ -62,3 +101,8 @@ class SymToTensorPass(ExportPass):
         args, kwargs = map_args(op, try_coerce, args, kwargs)
 
         return super().call_operator(op, args, kwargs, meta)
+
+    def call(self, graph_module: torch.fx.GraphModule) -> PassResult:
+        if not self._has_symbolic_candidate(graph_module):
+            return PassResult(graph_module, False)
+        return super().call(graph_module)

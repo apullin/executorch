@@ -13,7 +13,10 @@ from typing import List, Optional
 
 import torch
 
-from executorch.exir.operator.convert import _pybind_schema_to_native_schema
+from executorch.exir.operator.convert import (
+    _ensure_quantized_out_variant_registered,
+    _pybind_schema_to_native_schema,
+)
 from torch._ops import OpOverload, OpOverloadPacket
 from torchgen.model import FunctionSchema, SchemaKind
 
@@ -23,7 +26,22 @@ def get_torch_op_overload(
 ) -> torch._ops.OpOverload:
     packet: OpOverloadPacket = getattr(getattr(torch.ops, namespace), opname)
     if overload:
-        return getattr(packet, overload)
+        try:
+            return getattr(packet, overload)
+        except AttributeError:
+            if namespace != "quantized_decomposed":
+                raise
+
+            default_op = getattr(packet, "default", None)
+            if default_op is None or not _ensure_quantized_out_variant_registered(
+                default_op
+            ):
+                raise
+
+            refreshed_packet: OpOverloadPacket = getattr(
+                getattr(torch.ops, namespace), opname
+            )
+            return getattr(refreshed_packet, overload)
     else:
         return packet.default
 
@@ -56,31 +74,43 @@ def to_variant(op: OpOverload, variant: SchemaKind) -> OpOverload:
         native_schema is not None
     ), f"Schema: {op._schema} cannot be converted to torch.FunctionSchema"
 
-    # get all overloads
-    torch_packet = getattr(
-        getattr(torch.ops, op.namespace), op._schema.name.split("::")[1]
-    )
-    schemas: List[torch._C.FunctionSchema] = [
-        getattr(torch_packet, o)._schema
-        for o in torch._C._jit_get_operation(op._schema.name)[1]
-    ]
-    # compare the signature of out variant overload with the signature of the original overload
-    signature = dataclasses.replace(native_schema.signature(), returns=())
-    for schema in schemas:
-        native_s: Optional[FunctionSchema] = _pybind_schema_to_native_schema(schema)
-        if native_s is None:
-            logging.warning(
-                f"Schema: {schema} cannot be converted to torch.FunctionSchema"
-            )
-            continue
-        if (
-            native_s.kind() == variant
-            and dataclasses.replace(native_s.signature(), returns=()) == signature
-        ):
-            op_variant = get_torch_op_overload(
-                op.namespace, schema.name.split("::")[1], schema.overload_name
-            )
+    def find_variant() -> tuple[Optional[OpOverload], List[torch._C.FunctionSchema]]:
+        torch_packet = getattr(
+            getattr(torch.ops, op.namespace), op._schema.name.split("::")[1]
+        )
+        schemas: List[torch._C.FunctionSchema] = [
+            getattr(torch_packet, o)._schema
+            for o in torch._C._jit_get_operation(op._schema.name)[1]
+        ]
+        signature = dataclasses.replace(native_schema.signature(), returns=())
+        for schema in schemas:
+            native_s: Optional[FunctionSchema] = _pybind_schema_to_native_schema(schema)
+            if native_s is None:
+                logging.warning(
+                    f"Schema: {schema} cannot be converted to torch.FunctionSchema"
+                )
+                continue
+            if (
+                native_s.kind() == variant
+                and dataclasses.replace(native_s.signature(), returns=()) == signature
+            ):
+                return (
+                    get_torch_op_overload(
+                        op.namespace, schema.name.split("::")[1], schema.overload_name
+                    ),
+                    schemas,
+                )
+        return None, schemas
+
+    op_variant, schemas = find_variant()
+    if op_variant is not None:
+        return op_variant
+
+    if variant == SchemaKind.out and _ensure_quantized_out_variant_registered(op):
+        op_variant, schemas = find_variant()
+        if op_variant is not None:
             return op_variant
+
     raise RuntimeError(
         f"{variant} variant of operator {op.name()} can't be found. We've found the schemas of all the overloads: {[str(s) for s in schemas]}"
     )
