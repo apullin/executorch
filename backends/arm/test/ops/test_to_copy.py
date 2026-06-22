@@ -7,7 +7,6 @@
 # Tests the _to_copy op which is interpreted as a cast for our purposes.
 #
 
-import os
 from typing import Tuple
 
 import torch
@@ -339,13 +338,6 @@ redundant_xfails_FP = {
 redundant_xfails_INT = redundant_xfails_FP | {
     "rand_fp16_fp16": "FP16 is not supported",
 }
-
-if os.environ.get("ARM_TEST_ENABLE_DIRECT_BACKEND_LOWERING") == "1":
-    # The direct-lowering lane lowers quantized-input redundant casts that the
-    # standard ATen->Edge tracing path cannot, so int8/int16 no longer xfail in either lane.
-    redundant_xfails_FP = {}
-    redundant_xfails_INT = {"rand_fp16_fp16": "FP16 is not supported"}
-
 
 @common.parametrize(
     "test_data", _TO_COPY_TEST_DATA_REDUNDANT_CAST, xfails=redundant_xfails_FP
