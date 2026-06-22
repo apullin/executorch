@@ -28,7 +28,7 @@ from executorch.exir.backend.backend_api import (
     MethodProgramsPartitionerSpec,
     to_backend,
 )
-from executorch.exir.backend.partitioner import Partitioner
+from executorch.exir.backend.partitioner import DirectLoweringResult, Partitioner
 from executorch.exir.capture._config import EdgeCompileConfig, ExecutorchBackendConfig
 from executorch.exir.delegate import executorch_call_delegate, is_lowered_module
 from executorch.exir.emit import emit_program, EmitterOutput
@@ -106,6 +106,32 @@ Val = Any
 from typing import Any, Callable
 
 from torch.library import Library
+
+_PRESERVE_OP_WARNING_CACHE: Set[str] = set()
+EdgeManagerForPartitionersDefault = Callable[
+    [
+        Dict[str, List[Partitioner]],
+        Dict[str, ExportedProgram],
+        EdgeCompileConfig,
+        Optional[Dict[str, Any]],
+        bool,
+    ],
+    "EdgeProgramManager",
+]
+EdgeManagerForPartitionersOverride = Callable[
+    [
+        EdgeManagerForPartitionersDefault,
+        Dict[str, List[Partitioner]],
+        Dict[str, ExportedProgram],
+        EdgeCompileConfig,
+        Optional[Dict[str, Any]],
+        bool,
+    ],
+    "EdgeProgramManager",
+]
+_EDGE_MANAGER_FOR_PARTITIONERS_OVERRIDE: Optional[
+    EdgeManagerForPartitionersOverride
+] = None
 
 try:
     from executorch.exir.program.fb.logger import et_logger
@@ -989,6 +1015,28 @@ def _restore_transformed_ops_to_aten_ops(program: ExportedProgram):
                 node.target = transform_op_to_aten_op[str(node.target)]
 
 
+def _has_untransformed_no_decomp_ops(
+    program: ExportedProgram,
+    ops_no_decomp: Sequence[torch._ops.OpOverload],
+) -> bool:
+    ops_no_decomp_set = set(ops_no_decomp)
+    if not ops_no_decomp_set:
+        return False
+
+    def graph_has_target(graph: torch.fx.Graph) -> bool:
+        return any(
+            node.op == "call_function" and node.target in ops_no_decomp_set
+            for node in graph.nodes
+        )
+
+    if graph_has_target(program.graph):
+        return True
+    return any(
+        graph_has_target(submod.graph)
+        for _, submod, _ in get_control_flow_submodules(program.graph_module)
+    )
+
+
 # Returns the op in edge_no_decomp_namespace namespace for the aten
 # op that is passed in.
 def _get_transformed_op(op_aten):
@@ -1173,7 +1221,35 @@ def _can_skip_using_EDGE_DO_NOT_DECOMP(
     return check_op_support is None
 
 
-def _gen_edge_manager_for_partitioners(
+def set_edge_manager_for_partitioners_override(
+    override: Optional[EdgeManagerForPartitionersOverride],
+) -> None:
+    """Install an optional override for edge-manager generation.
+
+    External integrations can use this to customize preserve-op/decomposition
+    handling without monkey-patching `_gen_edge_manager_for_partitioners`.
+    The default ExecuTorch path is unchanged when no override is installed.
+    """
+
+    global _EDGE_MANAGER_FOR_PARTITIONERS_OVERRIDE
+    _EDGE_MANAGER_FOR_PARTITIONERS_OVERRIDE = override
+
+
+def clear_edge_manager_for_partitioners_override() -> None:
+    """Remove any installed edge-manager generation override."""
+
+    set_edge_manager_for_partitioners_override(None)
+
+
+def get_edge_manager_for_partitioners_override() -> Optional[
+    EdgeManagerForPartitionersOverride
+]:
+    """Return the active edge-manager generation override, if present."""
+
+    return _EDGE_MANAGER_FOR_PARTITIONERS_OVERRIDE
+
+
+def _gen_edge_manager_for_partitioners_default(
     partitioner: Dict[str, List[Partitioner]],
     aten_programs: Dict[str, ExportedProgram],
     config: EdgeCompileConfig,
@@ -1254,8 +1330,13 @@ def _gen_edge_manager_for_partitioners(
                     )
                     final_ops_to_preserve.update(preserved_ops)
 
-                    # Second pass of decompositions with this partitioner's preserved ops after filtering
-                    program = program.run_decompositions(_default_decomposition_table())
+                    # Decompose no-decomp ops rejected by the support filter. If every
+                    # remaining candidate was rewritten into EDGE_DO_NOT_DECOMP, the
+                    # full-table pass is a no-op and costs a complete graph rewrite.
+                    if _has_untransformed_no_decomp_ops(program, curr_ops_no_decomp):
+                        program = program.run_decompositions(
+                            _default_decomposition_table()
+                        )
 
                     # Restore ops from edge_no_decomp_namespace to aten ops
                     _restore_transformed_ops_to_aten_ops(program)
@@ -1291,6 +1372,86 @@ def _gen_edge_manager_for_partitioners(
         edge_manager._etrecord = etrecord
 
     return edge_manager
+
+
+def _gen_edge_manager_for_partitioners(
+    partitioner: Dict[str, List[Partitioner]],
+    aten_programs: Dict[str, ExportedProgram],
+    config: EdgeCompileConfig,
+    constant_methods: Optional[Dict[str, Any]],
+    generate_etrecord: Optional[bool] = False,
+) -> "EdgeProgramManager":
+    override = get_edge_manager_for_partitioners_override()
+    if override is not None:
+        return override(
+            _gen_edge_manager_for_partitioners_default,
+            partitioner,
+            aten_programs,
+            config,
+            constant_methods,
+            bool(generate_etrecord),
+        )
+
+    return _gen_edge_manager_for_partitioners_default(
+        partitioner,
+        aten_programs,
+        config,
+        constant_methods,
+        generate_etrecord,
+    )
+
+
+def _maybe_direct_lower_with_partitioners(
+    partitioner: Dict[str, List[Partitioner]],
+    aten_programs: Dict[str, ExportedProgram],
+    config: EdgeCompileConfig,
+    constant_methods: Optional[Dict[str, Any]],
+    generate_etrecord: bool = False,
+) -> tuple[Optional["EdgeProgramManager"], Set[str]]:
+    """
+    Try an experimental direct-lowering fast path.
+
+    This path is intentionally conservative:
+    - disabled by default via config
+    - requires exactly one partitioner per method
+    - declines when transform passes are requested by the caller
+    - falls back to the existing path on any non-applicable method
+    """
+    if not config._enable_direct_backend_lowering:
+        return None, set()
+
+    direct_programs: Dict[str, ExportedProgram] = {}
+    for name, program in aten_programs.items():
+        partitioners_for_program = partitioner.get(name, [])
+        if len(partitioners_for_program) != 1:
+            return None, set()
+
+        direct_result = partitioners_for_program[0].direct_lower(program, config)
+        if direct_result is None:
+            return None, set()
+        assert isinstance(direct_result, DirectLoweringResult)
+        direct_program = direct_result.exported_program
+        if direct_result.post_lowering_passes:
+            direct_program = _transform(
+                direct_program,
+                *direct_result.post_lowering_passes,
+                override_verifiers=direct_result.override_verifiers,
+            )
+        direct_programs[name] = direct_program
+
+    edge_manager = EdgeProgramManager(
+        direct_programs,
+        constant_methods,
+        config,
+    )
+
+    if generate_etrecord:
+        etrecord = _create_empty_etrecord()
+        etrecord.add_exported_program(aten_programs)
+        etrecord.add_edge_dialect_program(copy.deepcopy(edge_manager))
+        edge_manager._etrecord = etrecord
+
+    return edge_manager, set(direct_programs.keys())
 
 
 def collect_named_data_store_from_exported_program(
@@ -1393,9 +1554,21 @@ def to_edge_transform_and_lower(  # noqa: C901
     elif partitioner is None:
         partitioner = {name: [] for name in aten_programs.keys()}
 
-    edge_manager = _gen_edge_manager_for_partitioners(
-        partitioner, aten_programs, config, constant_methods, generate_etrecord
-    )
+    edge_manager = None
+    direct_lowered_methods: Set[str] = set()
+    if transform_passes is None:
+        edge_manager, direct_lowered_methods = _maybe_direct_lower_with_partitioners(
+            partitioner,
+            aten_programs,
+            config,
+            constant_methods,
+            generate_etrecord,
+        )
+
+    if edge_manager is None:
+        edge_manager = _gen_edge_manager_for_partitioners(
+            partitioner, aten_programs, config, constant_methods, generate_etrecord
+        )
 
     if transform_passes is not None:
         edge_manager = edge_manager.transform(transform_passes)
@@ -1412,9 +1585,12 @@ def to_edge_transform_and_lower(  # noqa: C901
     for i in range(max_num_partitioners):
         method_to_partitioner = {}
         for name, partitioner_list in partitioner.items():
+            if name in direct_lowered_methods:
+                continue
             if i < len(partitioner_list):
                 method_to_partitioner[name] = partitioner_list[i]
-        edge_manager = edge_manager.to_backend(method_to_partitioner)
+        if method_to_partitioner:
+            edge_manager = edge_manager.to_backend(method_to_partitioner)
 
     for name, program in edge_manager._edge_programs.items():
         ops_set_to_not_decompose: Set[torch._ops.OpOverload] = set()

@@ -50,6 +50,9 @@ class EdgeCompileConfig:
     # Allow ops to be preserved in the graph, i.e., prevent them from being decomposed.
     # These may be core or non-core ATen ops; custom ops should not be here.
     preserve_ops: List[torch.torch._ops.OpOverload] = field(default_factory=list)
+    # Experimental: allow a partitioner to bypass the generic ATen-to-Edge
+    # conversion path and return a directly lowered program for packaging.
+    _enable_direct_backend_lowering: bool = False
 
 
 @compatibility(is_backward_compatible=False)

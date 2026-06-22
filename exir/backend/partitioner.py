@@ -7,13 +7,29 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Callable, Dict, List, Mapping, NamedTuple, Optional, Tuple, Union
+from typing import (
+    Callable,
+    Dict,
+    List,
+    Mapping,
+    NamedTuple,
+    Optional,
+    Tuple,
+    TYPE_CHECKING,
+    Type,
+    Union,
+)
 
 import torch
 
 from executorch.exir.backend.backend_details import enforcedmethod
 from executorch.exir.backend.compile_spec_schema import CompileSpec
 from torch.export import ExportedProgram
+
+if TYPE_CHECKING:
+    from executorch.exir.capture import EdgeCompileConfig
+    from executorch.exir.pass_manager import PassType
+    from torch._export.verifier import Verifier
 
 
 class DelegationSpec(NamedTuple):
@@ -31,6 +47,22 @@ class PartitionResult:
 
     tagged_exported_program: ExportedProgram
     partition_tags: Dict[str, DelegationSpec]
+
+
+@dataclass
+class DirectLoweringResult:
+    """
+    exported_program: a backend-lowered ExportedProgram that is ready for
+    direct handoff back into ExecuTorch's packaging flow.
+    post_lowering_passes: optional legalization passes to run before wrapping
+    the program in an EdgeProgramManager.
+    override_verifiers: optional verifier classes to use while applying the
+    post-lowering passes.
+    """
+
+    exported_program: ExportedProgram
+    post_lowering_passes: Tuple["PassType", ...] = ()
+    override_verifiers: Optional[List[Type["Verifier"]]] = None
 
 
 class Partitioner(ABC):
@@ -112,3 +144,18 @@ class Partitioner(ABC):
             in the list returned by ops_to_not_decompose.
         """
         return ([], None)
+
+    def direct_lower(
+        self,
+        exported_program: ExportedProgram,
+        compile_config: "EdgeCompileConfig",
+    ) -> Optional[DirectLoweringResult]:
+        """
+        Optional experimental fast path for backends that can directly lower an
+        earlier dialect than Edge.
+
+        Returning ``None`` means the partitioner does not support direct
+        lowering for the given program/config and ExecuTorch should use the
+        existing lowering path unchanged.
+        """
+        return None

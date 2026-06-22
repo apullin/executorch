@@ -9,11 +9,14 @@
 from executorch.exir.program._fake_program import get_fake_program
 from executorch.exir.program._program import (
     _to_edge,
+    clear_edge_manager_for_partitioners_override,
     edge_to_executorch_passes,
     EdgeProgramManager,
     ExecutorchProgram,
     ExecutorchProgramManager,
     ExirExportedProgram,
+    get_edge_manager_for_partitioners_override,
+    set_edge_manager_for_partitioners_override,
     to_edge,
     to_edge_transform_and_lower,
 )
@@ -27,6 +30,9 @@ __all__ = [
     "edge_to_executorch_passes",
     "EdgeProgramManager",
     "ExecutorchProgramManager",
+    "set_edge_manager_for_partitioners_override",
+    "clear_edge_manager_for_partitioners_override",
+    "get_edge_manager_for_partitioners_override",
     "get_fake_program",
     "get_real_program",
 ]
