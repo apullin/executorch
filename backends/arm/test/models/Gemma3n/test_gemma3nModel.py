@@ -30,13 +30,19 @@ from transformers.models.gemma3n.modeling_gemma3n import (
     Gemma3nAudioEncoder,
     Gemma3nAudioSubSampleConvProjection,
     Gemma3nRMSNorm,
-    Gemma3nRotaryEmbedding,
     Gemma3nTextAltUp,
     Gemma3nTextAttention,
     Gemma3nTextDecoderLayer,
     Gemma3nTextLaurelBlock,
     Gemma3nTextMLP,
 )
+
+try:
+    from transformers.models.gemma3n.modeling_gemma3n import Gemma3nRotaryEmbedding
+except ImportError:
+    from transformers.models.gemma3n.modeling_gemma3n import (
+        Gemma3nTextRotaryEmbedding as Gemma3nRotaryEmbedding,
+    )
 
 input_t = Tuple[torch.Tensor, ...]
 
@@ -62,7 +68,14 @@ def _make_rope_embeddings(
     position_ids: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     rotary = Gemma3nRotaryEmbedding(config)
-    cos, sin = rotary(hidden_states, position_ids, layer_type=config.layer_types[0])
+    try:
+        cos, sin = rotary(
+            hidden_states,
+            position_ids,
+            layer_type=config.layer_types[0],
+        )
+    except TypeError:
+        cos, sin = rotary(hidden_states, position_ids)
     return cos, sin
 
 

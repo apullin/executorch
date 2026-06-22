@@ -77,13 +77,6 @@ def test_native_group_norm_tosa_FP(test_data):
 @common.parametrize(
     "test_data",
     test_data_suite,
-    xfails={
-        "randn_1_12_8_6_groups_12": "MLETORCH-925: Fix numerical issue for aten.native_group_norm",
-        "rand_6_8_10_12_groups_1": "MLETORCH-925: Fix numerical issue for aten.native_group_norm",
-        "rand_6_8_10_12_groups_4_no_affine": "MLETORCH-925: Fix numerical issue for aten.native_group_norm",
-        "rand_6_8_10_12_groups_8": "MLETORCH-925: Fix numerical issue for aten.native_group_norm",
-    },
-    strict=False,
 )
 def test_native_group_norm_tosa_INT(test_data):
     aten_op = "torch.ops.aten.sub.Tensor"  # 'sub' op arbitrarily chosen to confirm groupnorm was decomposed

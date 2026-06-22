@@ -75,7 +75,6 @@ exir_op = "executorch_exir_dialects_edge__ops_aten_max_pool2d_with_indices_defau
 
 
 @common.parametrize("test_data", test_data_suite_all)
-@pytest.mark.xfail(reason="MaxPool1D not yet supported", strict=False)
 def test_max_pool2d_tosa_FP_decomposed(test_data: Callable):
     """Test max_pool1d with TOSA FP pipeline."""
     test_data, model_params = test_data()

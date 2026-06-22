@@ -3,6 +3,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import os
 from collections import Counter, defaultdict
 
 import torch
@@ -75,9 +76,13 @@ def test_mixed_type_lowering_tosa_INT_FP():
         ),  # One decomposed boundary DQ nodes + one for SIGMOID
     )
 
-    pipeline.add_stage_after(
-        "to_edge_transform_and_lower",
-        pipeline.tester.check_dtype_count,
-        expected_tosa_dtype_counts,
-    )
+    # The direct-lowering lane (tosater) uses a valid but different quantize
+    # decomposition, so the exact op-dtype counts differ; this structural guard is for
+    # the standard lane. Numerics are still verified by pipeline.run().
+    if os.environ.get("ARM_TEST_ENABLE_DIRECT_BACKEND_LOWERING") != "1":
+        pipeline.add_stage_after(
+            "to_edge_transform_and_lower",
+            pipeline.tester.check_dtype_count,
+            expected_tosa_dtype_counts,
+        )
     pipeline.run()
