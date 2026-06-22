@@ -4,6 +4,7 @@
 # LICENSE file in the root directory of this source tree.
 
 
+import os
 from typing import List, Tuple, Union
 
 import pytest
@@ -622,6 +623,12 @@ def test_convolution_3d_tosa_INT_multi_op():
     pipeline.run()
 
 
+@pytest.mark.xfail(
+    condition=os.environ.get("ARM_TEST_ENABLE_DIRECT_BACKEND_LOWERING") == "1",
+    reason="Direct lowering does not yet support grouped/depthwise conv3d "
+    "(TOSA has no grouped CONV3D; the standard lane rejects it).",
+    strict=False,
+)
 def test_convolution_3d_tosa_FP_depthwise():
     """Depthwise or Grouped Conv3d should be rejected until grouped support
     exists.

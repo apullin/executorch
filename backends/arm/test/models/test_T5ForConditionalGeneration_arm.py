@@ -36,8 +36,10 @@ class TestT5ForConditionalGeneration:
         "torch.ops.higher_order.executorch_call_delegate": 2,
     }
 
+    # The 3 input adapter casts from int64 -> int32 may land inside or outside
+    # the delegate depending on the torch build, so only the delegate count is
+    # stable across supported environments.
     ops_after_partitioner_INT = {
-        "executorch_exir_dialects_edge__ops_dim_order_ops__to_dim_order_copy_default": 7,
         "torch.ops.higher_order.executorch_call_delegate": 3,
     }
 

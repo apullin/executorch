@@ -105,6 +105,42 @@ def test_permute_tosa_INT(test_data: torch.Tensor):
     pipeline.run()
 
 
+# Regression: a non-identity permute whose output is CONSUMED (not a graph boundary)
+# is serialized in physical NHWC layout, so the final NHWC->logical output transpose
+# must still fire even though the original output layout is not contiguous. The bare
+# SimplePermute cases above never exercise this (the permute is the output).
+permute_consume_suite = {
+    "rank_4": lambda: (torch.rand(2, 3, 4, 5), [0, 2, 1, 3]),
+    "rank_4_nhwc": lambda: (torch.rand(2, 3, 4, 5), [0, 2, 3, 1]),
+    "rank_5": lambda: (torch.rand(2, 3, 4, 5, 6), [0, 2, 4, 1, 3]),
+}
+
+
+class PermuteThenAdd(torch.nn.Module):
+    def __init__(self, dims: list[int]):
+        super().__init__()
+        self.dims = dims
+
+    def forward(self, x):
+        return torch.permute(x, self.dims) + 1.0
+
+
+@common.parametrize("test_data", permute_consume_suite)
+def test_permute_then_add_tosa_FP(test_data):
+    test_data, dims = test_data()
+    TosaPipelineFP[input_t1](
+        PermuteThenAdd(dims=dims), (test_data,), aten_op, exir_op
+    ).run()
+
+
+@common.parametrize("test_data", permute_consume_suite)
+def test_permute_then_add_tosa_INT(test_data):
+    test_data, dims = test_data()
+    TosaPipelineINT[input_t1](
+        PermuteThenAdd(dims=dims), (test_data,), aten_op, exir_op
+    ).run()
+
+
 @common.parametrize("test_data", test_data_suite | test_data_suite_u55)
 @common.XfailIfNoCorstone300
 def test_permute_u55_INT(test_data):

@@ -2,6 +2,7 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
+import os
 from typing import Tuple
 
 import torch
@@ -83,7 +84,17 @@ test_data_suite = {
 }
 
 
-@common.parametrize("test_data", test_data_suite)
+int64_fp_xfails = {}
+if os.environ.get("ARM_TEST_ENABLE_DIRECT_BACKEND_LOWERING") == "1":
+    # int64 values exceeding int32 range are not representable in TOSA (int32-only);
+    # the int64->int32 cast of a runtime buffer overflows. (The const-overflow path
+    # folds at trace time and is unaffected.)
+    int64_fp_xfails = {
+        "fp32_in+int64_buffer_overflow": "int64 buffer value exceeds int32 range (TOSA is int32-only)."
+    }
+
+
+@common.parametrize("test_data", test_data_suite, xfails=int64_fp_xfails)
 def test_int64_tosa_FP(test_data: Tuple):
     model, inputs = test_data
     (

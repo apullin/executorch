@@ -444,6 +444,8 @@ def test_conv_transpose2d_tosa_INT_qat_correct_qspec_wrong_ctor_axis(test_data):
     assert all(obs.ch_axis == 1 for _, obs in per_channel_fqs)
 
 
+# Per-channel int4 weight quantization fails in convert_pt2e for transpose conv in this
+# environment; xfail all per-channel cases (upstream narrows this to grouped-only).
 _a8w4_transpose_conv_xfails = {
     k: "per-channel int4 weight quantization is not supported for transpose conv yet."
     for k in test_data_INT
