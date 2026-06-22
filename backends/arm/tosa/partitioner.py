@@ -65,7 +65,9 @@ logger = logging.getLogger(__name__)
 
 
 def _direct_lower_node_limit() -> int:
-    raw = os.environ.get("ET_ARM_TOSA_DIRECT_LOWER_NODE_LIMIT")
+    raw = os.environ.get("RETAB_DIRECT_LOWER_NODE_LIMIT")
+    if raw is None:
+        raw = os.environ.get("ET_ARM_TOSA_DIRECT_LOWER_NODE_LIMIT")
     if raw is None:
         raw = os.environ.get("ARM_TOSA_ENGINE_DIRECT_LOWER_NODE_LIMIT")
     if raw is None:

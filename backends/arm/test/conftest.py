@@ -28,7 +28,11 @@ def pytest_configure(config):
 
     logging.basicConfig(stream=sys.stdout)
 
-    if os.environ.get("ARM_TEST_ENABLE_ARM_TOSA_ENGINE_PATCH", "0") in (
+    enable_retab_patch = os.environ.get(
+        "RETAB_ENABLE_PATCH",
+        os.environ.get("ARM_TEST_ENABLE_ARM_TOSA_ENGINE_PATCH", "0"),
+    )
+    if enable_retab_patch in (
         "",
         "0",
         "false",
@@ -36,7 +40,7 @@ def pytest_configure(config):
     ):
         return
 
-    engine_root = os.environ.get("ARM_TOSA_ENGINE_ROOT")
+    engine_root = os.environ.get("RETAB_ROOT", os.environ.get("ARM_TOSA_ENGINE_ROOT"))
     if engine_root and engine_root not in sys.path:
         sys.path.insert(0, engine_root)
 
@@ -47,7 +51,7 @@ def pytest_configure(config):
         sys.path.insert(0, executorch_src_root)
 
     integration_module_name = os.environ.get(
-        "ARM_TOSA_ENGINE_IMPORT", "fast_preprocess"
+        "RETAB_IMPORT", os.environ.get("ARM_TOSA_ENGINE_IMPORT", "fast_preprocess")
     )
 
     try:
@@ -63,10 +67,10 @@ def pytest_configure(config):
             )
     except (ImportError, AttributeError) as exc:
         raise RuntimeError(
-            "ARM test lane requested arm-tosa-engine patching, but the "
+            "ARM test lane requested RETAB patching, but the "
             f"integration module '{integration_module_name}' could not be "
-            "loaded. Set ARM_TOSA_ENGINE_ROOT or ARM_TOSA_ENGINE_IMPORT and "
-            "install the arm-tosa-engine package in the active environment."
+            "loaded. Set RETAB_ROOT or RETAB_IMPORT and install the RETAB "
+            "package in the active environment."
         ) from exc
 
     install()
