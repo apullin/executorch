@@ -14,12 +14,24 @@ from executorch.backends.arm._passes.fuse_constant_ops_pass import (
 from executorch.exir.dialects._ops import ops as exir_ops
 from executorch.exir.pass_base import ExportPass
 
+_EDGE_TRIL_COPY_DEFAULT = getattr(
+    getattr(exir_ops.edge.aten, "tril_copy", None), "default", None
+)
+_TARGET_OPS = tuple(
+    op
+    for op in (
+        exir_ops.edge.aten.tril.default,
+        _EDGE_TRIL_COPY_DEFAULT,
+        torch.ops.aten.tril.default,
+    )
+    if op is not None
+)
+
 
 def _get_ops(op):
     """Return the namespace-matched operators used by the decomposition."""
-    tril_copy = getattr(exir_ops.edge.aten, "tril_copy", None)
 
-    if op in (exir_ops.edge.aten.tril.default, getattr(tril_copy, "default", None)):
+    if op in (exir_ops.edge.aten.tril.default, _EDGE_TRIL_COPY_DEFAULT):
         return {
             "arange": exir_ops.edge.aten.arange.default,
             "view": exir_ops.edge.aten.view_copy.default,
@@ -53,12 +65,11 @@ class DecomposeTrilPass(ArmPass):
 
     """
 
+    targeted_ops = _TARGET_OPS
     _passes_required_after: Set[Type[ExportPass]] = {ComputeConstantOpsAOTPass}
 
     def call_operator(self, op, args, kwargs, meta):
-        handled_ops = [torch.ops.aten.tril.default]
-
-        if op not in handled_ops:
+        if op not in self.targeted_ops:
             return super().call_operator(op, args, kwargs, meta)
 
         x = args[0]

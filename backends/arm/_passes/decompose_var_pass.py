@@ -18,6 +18,12 @@ from executorch.backends.arm._passes.fuse_constant_ops_pass import (
 from executorch.exir.dialects._ops import ops as exir_ops
 from executorch.exir.pass_base import ExportPass
 
+_TARGET_OPS = (
+    exir_ops.edge.aten.var.correction,
+    torch.ops.aten.var.correction,
+    torch.ops.aten.var.dim,
+)
+
 
 def get_var_decomposition(op) -> tuple:
     if op == exir_ops.edge.aten.var.correction:
@@ -51,6 +57,7 @@ class DecomposeVarPass(ArmPass):
         y = div(sum, max(0, N-correction))
     """
 
+    targeted_ops = _TARGET_OPS
     _passes_required_after: Set[Type[ExportPass]] = {
         ComputeConstantOpsAOTPass,
         DecomposeMeanDimPass,
@@ -58,11 +65,7 @@ class DecomposeVarPass(ArmPass):
     }
 
     def call_operator(self, op, args, kwargs, meta):
-        if op not in (
-            exir_ops.edge.aten.var.correction,
-            torch.ops.aten.var.correction,
-            torch.ops.aten.var.dim,
-        ) or not self.allowed_to_transform(meta):
+        if op not in self.targeted_ops or not self.allowed_to_transform(meta):
             return super().call_operator(op, args, kwargs, meta)
 
         x = args[0]

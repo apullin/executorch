@@ -19,6 +19,13 @@ from executorch.backends.arm.constants import DQ_OPS, Q_OPS
 from executorch.exir.dialects._ops import ops as exir_ops
 from executorch.exir.pass_base import ExportPass
 
+_TARGET_OPS = (
+    exir_ops.edge.aten.mean.dim,
+    torch.ops.aten.mean.dim,
+    exir_ops.edge.aten.mean.default,
+    torch.ops.aten.mean.default,
+)
+
 
 def get_meandim_decomposition(op) -> tuple:
     if op in (exir_ops.edge.aten.mean.dim, exir_ops.edge.aten.mean.default):
@@ -89,6 +96,7 @@ class DecomposeMeanDimPass(ArmPass):
 
     """
 
+    targeted_ops = _TARGET_OPS
     _passes_required_after: Set[Type[ExportPass]] = {
         ComputeConstantOpsAOTPass,
         DecomposeSumPass,
@@ -101,12 +109,7 @@ class DecomposeMeanDimPass(ArmPass):
         self._tosa_spec = tosa_spec
 
     def call_operator(self, op, args, kwargs, meta, updated=False):
-        if op not in (
-            exir_ops.edge.aten.mean.dim,
-            torch.ops.aten.mean.dim,
-            exir_ops.edge.aten.mean.default,
-            torch.ops.aten.mean.default,
-        ) or not self.allowed_to_transform(meta):
+        if op not in self.targeted_ops or not self.allowed_to_transform(meta):
             return super().call_operator(op, args, kwargs, meta, updated)
 
         x = get_node_arg(args, 0)

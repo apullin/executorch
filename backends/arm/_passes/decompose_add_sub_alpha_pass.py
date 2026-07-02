@@ -23,6 +23,7 @@ _SUB_OPS = (
     exir_ops.edge.aten.sub.Tensor,
     torch.ops.aten.sub.Tensor,
 )
+_TARGET_OPS = _ADD_OPS + _SUB_OPS
 
 
 def _get_ops(op):
@@ -58,10 +59,11 @@ def _should_decompose(alpha) -> bool:
 class DecomposeAddSubAlphaPass(ArmPass):
     """Rewrite add/sub with alpha into a mul followed by add/sub."""
 
+    targeted_ops = _TARGET_OPS
     _passes_required_after: Set[Type[ExportPass]] = set()
 
     def call_operator(self, op, args, kwargs, meta, updated: bool | None = False):
-        if op not in _ADD_OPS + _SUB_OPS:
+        if op not in self.targeted_ops:
             return super().call_operator(op, args, kwargs, meta, updated)
 
         alpha = kwargs.get("alpha", 1)

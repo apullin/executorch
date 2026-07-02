@@ -6,6 +6,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
+import sys
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -186,6 +187,9 @@ class PassInsertions:
 
 
 _registered_pass_insertions: dict[type, PassInsertions] = {}
+# This ExportPass refresh preserves shared-weight quant metadata even when it
+# rewrites no scalar ops.
+_TFA_ALWAYS_RUN_PASSES = {"ReplaceScalarWithTensorByProfilePass"}
 
 
 def register_pass_insertions_before(
@@ -209,6 +213,108 @@ def register_pass_insertions_after(
 def clear_registered_pass_insertions() -> None:
     """Clear all globally registered pass insertions."""
     _registered_pass_insertions.clear()
+
+
+class TargetGuardedPass:
+    def __init__(self, pipeline_pass, targets: Sequence[object]) -> None:
+        self.pipeline_pass = pipeline_pass
+        self.targets = tuple(targets)
+        self.__name__ = ArmPass.get_name(pipeline_pass)
+        if hasattr(pipeline_pass, "_passes_required_after"):
+            self._passes_required_after = pipeline_pass._passes_required_after
+
+    def __call__(self, graph_module: GraphModule) -> PassResult:
+        if not graph_module_contains_targets(graph_module, self.targets):
+            return PassResult(graph_module, False)
+        return self.pipeline_pass(graph_module)
+
+
+def _flatten_target_values(value) -> tuple[object, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, dict):
+        return tuple(value.keys())
+    if isinstance(value, (tuple, list, set, frozenset)):
+        return tuple(value)
+    return (value,)
+
+
+def _dedupe_targets(targets: list[object]) -> tuple[object, ...]:
+    unique = []
+    seen = set()
+    for target in targets:
+        marker = id(target)
+        if marker not in seen:
+            seen.add(marker)
+            unique.append(target)
+    return tuple(unique)
+
+
+def _looks_like_graph_target(value) -> bool:
+    target_type = type(value)
+    return target_type.__name__.endswith("OpOverload") and target_type.__module__ in (
+        "torch._ops",
+        "executorch.exir.dialects.edge._ops",
+    )
+
+
+def candidate_targets_for_pass(pipeline_pass) -> tuple[object, ...]:
+    targets = []
+    direct_attrs = (
+        "targeted_ops",
+        "_targeted_ops",
+        "_TARGET_OPS",
+        "_TARGETS",
+        "_TARGET",
+        "torch_linalg_vector_norm",
+        "torch_cosine_similarity",
+    )
+    for owner in (pipeline_pass, type(pipeline_pass)):
+        for attr in direct_attrs:
+            targets.extend(_flatten_target_values(getattr(owner, attr, None)))
+
+    module = sys.modules.get(type(pipeline_pass).__module__)
+    if module is not None:
+        for name, value in vars(module).items():
+            if name == "OP_MAP":
+                targets.extend(
+                    target
+                    for target in _flatten_target_values(value)
+                    if _looks_like_graph_target(target)
+                )
+            elif (
+                (
+                    name.endswith("_ops")
+                    or name in ("torch_softmax", "edge_softmax")
+                    or name.startswith(("aten_", "edge_", "torch_"))
+                )
+                and isinstance(value, (tuple, list, set, frozenset, dict))
+            ):
+                targets.extend(
+                    target
+                    for target in _flatten_target_values(value)
+                    if _looks_like_graph_target(target)
+                )
+            elif name.startswith(
+                ("aten_", "edge_", "torch_")
+            ) and _looks_like_graph_target(value):
+                targets.append(value)
+
+    return _dedupe_targets(targets)
+
+
+def graph_module_contains_targets(
+    graph_module: GraphModule, targets: Sequence[object]
+) -> bool:
+    if not targets:
+        return True
+    for module in graph_module.modules():
+        if not isinstance(module, GraphModule):
+            continue
+        for node in module.graph.nodes:
+            if node.op == "call_function" and node.target in targets:
+                return True
+    return False
 
 
 class ArmPassManager(PassManager):
@@ -372,6 +478,24 @@ class ArmPassManager(PassManager):
         for p in passes:
             if p is not None:
                 self.add_pass(p)
+
+    def add_target_guarded_pass(self, pipeline_pass):
+        pass_name = ArmPass.get_name(pipeline_pass)
+        if pass_name in _TFA_ALWAYS_RUN_PASSES:
+            self.add_pass(pipeline_pass)
+            return
+        if type(pipeline_pass) in self._skip_pass_types:
+            return
+        targets = candidate_targets_for_pass(pipeline_pass)
+        if targets:
+            super().add_pass(TargetGuardedPass(pipeline_pass, targets))
+        else:
+            self.add_pass(pipeline_pass)
+
+    def add_target_guarded_passes(self, passes: Sequence[ExportPass | None]):
+        for p in passes:
+            if p is not None:
+                self.add_target_guarded_pass(p)
 
     def _tosa_context(self, graph_module: GraphModule) -> TosaLoweringContext:
         shape_env = _get_shape_env_from_gm(graph_module)
@@ -585,7 +709,7 @@ class ArmPassManager(PassManager):
             self.add_pass(ConstantFoldingPass())
 
             # Transformation passes (pre scalar -> tensor)
-            self.add_passes(
+            self.add_target_guarded_passes(
                 [
                     DecomposeIndexCopyPass(tfa_pass=True),
                     DecomposeSelectScatterPass(tfa_pass=True),
@@ -620,7 +744,7 @@ class ArmPassManager(PassManager):
             )
 
             # Scalars -> tensors
-            self.add_passes(
+            self.add_target_guarded_passes(
                 [
                     ReplaceScalarWithTensorByProfilePass(tfa_pass=True),
                     ScalarsToAttributePass(tfa_pass=True),
@@ -629,7 +753,7 @@ class ArmPassManager(PassManager):
             )
 
             # Transformation passes (post scalar removal)
-            self.add_passes(
+            self.add_target_guarded_passes(
                 [
                     NormalizeWhileInitialArgsPass(use_exir_clone=False, tfa_pass=True),
                     DecomposeGruPass(tfa_pass=True),
@@ -651,7 +775,7 @@ class ArmPassManager(PassManager):
             )
 
             # Postprocessing passes
-            self.add_passes(
+            self.add_target_guarded_passes(
                 [
                     ReplaceInfAndLimitValuesPass(tfa_pass=True),
                     DecomposeMaskedFillPass(tfa_pass=True),
