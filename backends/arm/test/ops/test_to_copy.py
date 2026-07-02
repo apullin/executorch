@@ -7,6 +7,8 @@
 # Tests the _to_copy op which is interpreted as a cast for our purposes.
 #
 
+import os
+
 from typing import Tuple
 
 import torch
@@ -330,10 +332,16 @@ _TO_COPY_TEST_DATA_REDUNDANT_CAST = {
     ),
 }
 
-redundant_xfails_FP = {
-    "rand_int8_int8": "Tracing graph with quantized input is not supported.",
-    "rand_int16_int16": "Tracing graph with quantized input is not supported.",
-}
+_DIRECT_BACKEND_LOWERING = os.environ.get("ARM_TEST_ENABLE_DIRECT_BACKEND_LOWERING") == "1"
+
+redundant_xfails_FP = (
+    {}
+    if _DIRECT_BACKEND_LOWERING
+    else {
+        "rand_int8_int8": "Tracing graph with quantized input is not supported.",
+        "rand_int16_int16": "Tracing graph with quantized input is not supported.",
+    }
+)
 
 redundant_xfails_INT = redundant_xfails_FP | {
     "rand_fp16_fp16": "FP16 is not supported",

@@ -54,7 +54,56 @@ class SpecPropPass(ExportPass):
     def __init__(self) -> None:
         super().__init__()
 
+    def _try_fast_delegate_spec_prop(
+        self, graph_module: torch.fx.GraphModule
+    ) -> Optional[PassResult]:
+        def get_spec(x):
+            if hasattr(x, "meta"):
+                return x.meta.get("spec", None)
+            return None
+
+        has_delegate = False
+        for module in graph_module.modules():
+            if not isinstance(module, torch.fx.GraphModule):
+                continue
+            for node in module.graph.nodes:
+                if (
+                    node.op == "call_function"
+                    and node.target == executorch_call_delegate
+                ):
+                    has_delegate = True
+                if node.op not in {"placeholder", "get_attr", "call_function", "output"}:
+                    return None
+                if node.op not in {"get_attr", "output"} and "val" not in node.meta:
+                    return None
+        if not has_delegate:
+            return None
+
+        for module in graph_module.modules():
+            if not isinstance(module, torch.fx.GraphModule):
+                continue
+            for node in module.graph.nodes:
+                meta_val = node.meta.get("val", None)
+                if node.op == "output":
+                    node.meta["spec"] = pytree.tree_map(get_spec, node.args[0])
+                elif node.op == "call_function" and node.target == operator.getitem:
+                    value_spec = pytree.tree_map(get_spec, node.args[0])
+                    node.meta["spec"] = value_spec[node.args[1]]
+                elif (
+                    node.op == "call_function"
+                    and node.target == executorch_call_delegate
+                    and "spec" in node.meta
+                ):
+                    continue
+                else:
+                    node.meta["spec"] = pytree.tree_map(make_spec, meta_val)
+        return PassResult(graph_module, True)
+
     def __call__(self, graph_module: torch.fx.GraphModule) -> PassResult:
+        fast_result = self._try_fast_delegate_spec_prop(graph_module)
+        if fast_result is not None:
+            return fast_result
+
         # Re-trace metadata to ensure it's up to date.
         res = ExportPass()(graph_module)
         assert res is not None

@@ -6,33 +6,88 @@
 
 # pyre-strict
 
+from typing import Any, Iterable, Optional
+
 import torch
 from executorch.exir.pass_base import ExportPass, map_args, NodeMetadata, ProxyValue
+from torch.fx.passes.infra.pass_base import PassResult
 from torch import SymBool, SymFloat, SymInt
 from torch._prims_common import elementwise_dtypes, ELEMENTWISE_TYPE_PROMOTION_KIND
 from torch.utils._pytree import PyTree
 
 
+_PROMOTION_TYPE_ALLOW_LIST = {
+    torch.ops.aten.add.Tensor: ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,
+    torch.ops.aten.mul.Tensor: ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,
+    torch.ops.aten.sub.Tensor: ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,
+    # The correct promotion for div depends on the mode. If there is no mode,
+    # it is INT_TO_FLOAT; otherwise it is default.
+    torch.ops.aten.div.Tensor: ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT,
+    torch.ops.aten.div.Tensor_mode: ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,
+    torch.ops.aten.minimum.default: ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,
+}
+
+
 class RemoveMixedTypeOperators(ExportPass):
+    def _arg_value(self, arg: Any) -> Any:
+        if isinstance(arg, torch.fx.Node):
+            return arg.meta.get("val")
+        return arg
+
+    def _is_tensor_like(self, value: Any) -> bool:
+        return isinstance(value, torch.Tensor)
+
+    def _candidate_values(self, args: Iterable[Any]) -> Optional[tuple[Any, ...]]:
+        values = tuple(self._arg_value(arg) for arg in args)
+        if any(value is None for value in values):
+            return None
+        return values
+
+    def _node_requires_mixed_type_rewrite(self, node: torch.fx.Node) -> bool:
+        promotion_kind = _PROMOTION_TYPE_ALLOW_LIST.get(node.target)
+        if promotion_kind is None:
+            return False
+        if (
+            node.target == torch.ops.aten.div.Tensor_mode
+            and node.kwargs.get("rounding_mode") is None
+        ):
+            promotion_kind = ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT
+
+        values = self._candidate_values(node.args)
+        if values is None:
+            return True
+
+        try:
+            promoted_dtype = elementwise_dtypes(
+                *values,
+                type_promotion_kind=promotion_kind,
+            )[1]
+        except Exception:
+            return True
+
+        return any(
+            self._is_tensor_like(value) and value.dtype != promoted_dtype
+            for value in values
+        )
+
+    def call(self, graph_module: torch.fx.GraphModule) -> PassResult:
+        if not any(
+            node.op == "call_function" and self._node_requires_mixed_type_rewrite(node)
+            for module in graph_module.modules()
+            if isinstance(module, torch.fx.GraphModule)
+            for node in module.graph.nodes
+        ):
+            return PassResult(graph_module, False)
+        return super().call(graph_module)
+
     # pyre-ignore
     def call_operator(self, op, args, kwargs, meta: NodeMetadata):  # noqa: C901
         if len(args) <= 1:
             # Unary Operators are not mixed type
             return super().call_operator(op, args, kwargs, meta)
 
-        promotion_type_allow_list = {
-            torch.ops.aten.add.Tensor: ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,
-            torch.ops.aten.mul.Tensor: ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,
-            torch.ops.aten.sub.Tensor: ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,
-            # The correct promotion for div depends on the mode! If there is no mode,
-            # it's INT_TO_FLOAT, otherwise it's default.
-            torch.ops.aten.div.Tensor: ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT,
-            torch.ops.aten.div.Tensor_mode: ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,
-            torch.ops.aten.minimum.default: ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,
-        }
-
-        if op in promotion_type_allow_list:
-            promotion_kind = promotion_type_allow_list[op]
+        if op in _PROMOTION_TYPE_ALLOW_LIST:
+            promotion_kind = _PROMOTION_TYPE_ALLOW_LIST[op]
             if (
                 op == torch.ops.aten.div.Tensor_mode
                 and kwargs.get("rounding_mode") is None

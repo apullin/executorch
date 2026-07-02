@@ -37,6 +37,7 @@ from executorch.backends.arm.operator_support.tosa_supported_operators import (
 )
 from executorch.backends.arm.tosa.backend import TOSABackend
 from executorch.backends.arm.tosa.compile_spec import TosaCompileSpec
+from executorch.exir._lowering_profile import profile_scope
 from executorch.exir.backend.partitioner import (
     DelegationSpec,
     DirectLoweringResult,
@@ -525,93 +526,104 @@ class TOSAPartitioner(Partitioner):
             A set of strings with the partition tags.
 
         """
-        tags: set[str] = set()
-        if tag_iterator is None:
-            tag_iterator = count(0)
-        for _, submodule, _ in get_cond_while_submodules_nested(module):
-            submodule_tags = self._tag_module(
-                submodule, containing_program, reporter, tag_iterator
-            )
-            if len(tags & submodule_tags) != 0:
-                raise RuntimeError(
-                    "Got overlapping tags in two different modules, this shouldn't happen."
-                )
-            tags = tags | submodule_tags
-        operator_support = tosa_support_factory(
-            self.tosa_spec, containing_program, reporter, self.additional_checks
-        )
-        if self._custom_partition_ops:
-            custom_ops = set(self._custom_partition_ops)
-
-            class CustomOpSupported(OperatorSupportBase):
-                def is_node_supported(self, submodules, node: torch.fx.Node) -> bool:
-                    return node.op == "call_function" and _is_custom_partition_op(
-                        custom_ops, node.target
+        with profile_scope(
+            "arm_tosa.partitioner.tag_module",
+            nodes=len(list(module.graph.nodes)),
+        ):
+            tags: set[str] = set()
+            if tag_iterator is None:
+                tag_iterator = count(0)
+            with profile_scope("arm_tosa.partitioner.tag_cf_submodules"):
+                for _, submodule, _ in get_cond_while_submodules_nested(module):
+                    submodule_tags = self._tag_module(
+                        submodule, containing_program, reporter, tag_iterator
                     )
-
-            operator_support = any_chain(operator_support, CustomOpSupported())
-        capability_partitioner = CapabilityBasedPartitioner(
-            module,
-            operator_support,
-            allows_single_node_partition=True,
-        )
-        partition_list = capability_partitioner.propose_partitions()
-
-        for partition in partition_list:
-            tag = f"tag{next(tag_iterator)}"
-            tags.add(tag)
-
-            for node in partition.nodes:
-                node.meta["delegation_tag"] = tag
-
-            if self.tosa_spec.support_integer() and not self.tosa_spec.support_float():
-                # Detag boundary Q/DQ since we cannot handle them without float support
-                self._detag_boundary_nodes(
-                    module,
-                    tag,
-                    reporter,
+                    if len(tags & submodule_tags) != 0:
+                        raise RuntimeError(
+                            "Got overlapping tags in two different modules, this shouldn't happen."
+                        )
+                    tags = tags | submodule_tags
+            with profile_scope("arm_tosa.partitioner.build_operator_support"):
+                operator_support = tosa_support_factory(
+                    self.tosa_spec, containing_program, reporter, self.additional_checks
                 )
+            if self._custom_partition_ops:
+                custom_ops = set(self._custom_partition_ops)
 
-            if self._preserve_io_quantization_enabled():
-                # Detag boundary Q/DQ to keep IO quantization outside delegate.
-                self._detag_boundary_nodes(
-                    module,
-                    tag,
-                    reporter,
-                    detag_first_fp_node=False,
-                )
+                class CustomOpSupported(OperatorSupportBase):
+                    def is_node_supported(self, submodules, node: torch.fx.Node) -> bool:
+                        return node.op == "call_function" and _is_custom_partition_op(
+                            custom_ops, node.target
+                        )
 
-            if self._partition_has_invalid_uint8(partition, tag):
-                reject_partition(
-                    "Partition contained internal uint8 tensors. Uint8 is only supported at IO boundaries for TOSA backends.",
-                    partition,
-                    reporter,
-                )
-                tags.remove(tag)
-                continue
-
-            # Check whether the partition contains only no-op or non-computational ops. Such partitions don't make sense to delegate, and in the worst case may be optimized away during lowering, which can break compilation."
-            is_nocompute_partition = all(
-                _is_noop_clone(node)
-                or _is_noop_alias_copy(node)
-                or _is_noop_expand(node)
-                or _is_noop_detach_copy(node)
-                or _is_noop_to_dim_order_copy(node)
-                or _is_noop_squeeze(node)
-                or _is_view_copy(node)
-                or _is_noop_as_strided_copy(node)
-                or node.target in Q_OPS
-                or node.target in DQ_OPS
-                for node in partition.nodes
+                operator_support = any_chain(operator_support, CustomOpSupported())
+            capability_partitioner = CapabilityBasedPartitioner(
+                module,
+                operator_support,
+                allows_single_node_partition=True,
             )
-            if is_nocompute_partition:
-                reject_partition(
-                    "Partition contained only ops which are removed in the TOSA lowering, leading to an empty partition.",
-                    partition,
-                    reporter,
-                )
-                tags.remove(tag)
-        return tags
+            with profile_scope("arm_tosa.partitioner.propose_partitions"):
+                partition_list = capability_partitioner.propose_partitions()
+
+            with profile_scope(
+                "arm_tosa.partitioner.refine_partitions",
+                partitions=len(partition_list),
+            ):
+                for partition in partition_list:
+                    tag = f"tag{next(tag_iterator)}"
+                    tags.add(tag)
+
+                    for node in partition.nodes:
+                        node.meta["delegation_tag"] = tag
+
+                    if self.tosa_spec.support_integer() and not self.tosa_spec.support_float():
+                        # Detag boundary Q/DQ since we cannot handle them without float support
+                        self._detag_boundary_nodes(
+                            module,
+                            tag,
+                            reporter,
+                        )
+
+                    if self._preserve_io_quantization_enabled():
+                        # Detag boundary Q/DQ to keep IO quantization outside delegate.
+                        self._detag_boundary_nodes(
+                            module,
+                            tag,
+                            reporter,
+                            detag_first_fp_node=False,
+                        )
+
+                    if self._partition_has_invalid_uint8(partition, tag):
+                        reject_partition(
+                            "Partition contained internal uint8 tensors. Uint8 is only supported at IO boundaries for TOSA backends.",
+                            partition,
+                            reporter,
+                        )
+                        tags.remove(tag)
+                        continue
+
+                    # Check whether the partition contains only no-op or non-computational ops. Such partitions don't make sense to delegate, and in the worst case may be optimized away during lowering, which can break compilation."
+                    is_nocompute_partition = all(
+                        _is_noop_clone(node)
+                        or _is_noop_alias_copy(node)
+                        or _is_noop_expand(node)
+                        or _is_noop_detach_copy(node)
+                        or _is_noop_to_dim_order_copy(node)
+                        or _is_noop_squeeze(node)
+                        or _is_view_copy(node)
+                        or _is_noop_as_strided_copy(node)
+                        or node.target in Q_OPS
+                        or node.target in DQ_OPS
+                        for node in partition.nodes
+                    )
+                    if is_nocompute_partition:
+                        reject_partition(
+                            "Partition contained only ops which are removed in the TOSA lowering, leading to an empty partition.",
+                            partition,
+                            reporter,
+                        )
+                        tags.remove(tag)
+            return tags
 
     def partition(self, exported_program: ExportedProgram) -> PartitionResult:
         """Partition the program and tag TOSA-compatible subgraphs.
@@ -635,26 +647,28 @@ class TOSAPartitioner(Partitioner):
             f"Partitioning for {self.delegation_spec.backend_id}: {self.tosa_spec}"
         )
 
-        reporter = WhyNoPartitionReporter()
-        tags = self._tag_module(
-            exported_program.graph_module, exported_program, reporter
-        )
-        partition_tags = {tag: self.delegation_spec for tag in tags}
-
-        tag_constant_data(exported_program)
-        if self.intermediate_path is not None and logger.level <= logging.INFO:
-            intermediate_path = Path(self.intermediate_path)
-            intermediate_path.mkdir(parents=True, exist_ok=True)
-            file_handler = logging.FileHandler(
-                intermediate_path / "partition_report.txt"
+        with profile_scope("arm_tosa.partitioner.partition"):
+            reporter = WhyNoPartitionReporter()
+            tags = self._tag_module(
+                exported_program.graph_module, exported_program, reporter
             )
-            logger.addHandler(file_handler)
-        logger.info(f"The following nodes were rejected for {self.tosa_spec}:")
-        logger.info("\n" + reporter.get_table_report())
-        logger.info("(Placeholders and outputs are not included in this list)")
-        return PartitionResult(
-            tagged_exported_program=exported_program, partition_tags=partition_tags
-        )
+            partition_tags = {tag: self.delegation_spec for tag in tags}
+
+            with profile_scope("arm_tosa.partitioner.tag_constant_data"):
+                tag_constant_data(exported_program)
+            if self.intermediate_path is not None and logger.level <= logging.INFO:
+                intermediate_path = Path(self.intermediate_path)
+                intermediate_path.mkdir(parents=True, exist_ok=True)
+                file_handler = logging.FileHandler(
+                    intermediate_path / "partition_report.txt"
+                )
+                logger.addHandler(file_handler)
+            logger.info(f"The following nodes were rejected for {self.tosa_spec}:")
+            logger.info("\n" + reporter.get_table_report())
+            logger.info("(Placeholders and outputs are not included in this list)")
+            return PartitionResult(
+                tagged_exported_program=exported_program, partition_tags=partition_tags
+            )
 
     def ops_to_not_decompose(  # noqa: C901
         self,

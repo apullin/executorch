@@ -14,6 +14,7 @@ from typing import Dict, Generator, List, Mapping
 
 import torch
 
+from executorch.exir._lowering_profile import profile_scope
 from executorch.exir.backend.backend_details import BackendDetails, PreprocessResult
 from executorch.exir.backend.compile_spec_schema import CompileSpec
 
@@ -108,30 +109,36 @@ def _(
     """
     assert isinstance(edge_program, ExportedProgram)
 
-    # All backend implementation are final, so we don't need to consider nested subclasses.
-    for cls in BackendDetails.__subclasses__():
-        if backend_id == cls.__name__:
-            copied_edge_program = copy.deepcopy(edge_program)
-            preprocess_result: PreprocessResult = cls.preprocess(
-                copied_edge_program,
-                compile_specs,
-            )
-            lowered_module = LoweredBackendModule(
-                edge_program=edge_program,
-                backend_id=backend_id,
-                processed_bytes=preprocess_result.processed_bytes,
-                compile_specs=compile_specs,
-                named_data_store_output=preprocess_result.data_store_output,
-            )
-            lowered_module.meta = {
-                "debug_handle_map": preprocess_result.debug_handle_map
-            }
-            if preprocess_result._delegate_info_meta is not None:
-                lowered_module.meta["_delegate_info_meta"] = (
-                    preprocess_result._delegate_info_meta
-                )
-            return lowered_module
-    raise NotImplementedError(f"Backend {backend_id} was not found.")
+    with profile_scope("backend.lower_to_backend", backend_id=backend_id):
+        # All backend implementation are final, so we don't need to consider nested subclasses.
+        for cls in BackendDetails.__subclasses__():
+            if backend_id == cls.__name__:
+                with profile_scope("backend.deepcopy_edge_program", backend_id=backend_id):
+                    copied_edge_program = copy.deepcopy(edge_program)
+                with profile_scope("backend.preprocess", backend_id=backend_id):
+                    preprocess_result: PreprocessResult = cls.preprocess(
+                        copied_edge_program,
+                        compile_specs,
+                    )
+                with profile_scope(
+                    "backend.construct_lowered_module", backend_id=backend_id
+                ):
+                    lowered_module = LoweredBackendModule(
+                        edge_program=edge_program,
+                        backend_id=backend_id,
+                        processed_bytes=preprocess_result.processed_bytes,
+                        compile_specs=compile_specs,
+                        named_data_store_output=preprocess_result.data_store_output,
+                    )
+                    lowered_module.meta = {
+                        "debug_handle_map": preprocess_result.debug_handle_map
+                    }
+                    if preprocess_result._delegate_info_meta is not None:
+                        lowered_module.meta["_delegate_info_meta"] = (
+                            preprocess_result._delegate_info_meta
+                        )
+                return lowered_module
+        raise NotImplementedError(f"Backend {backend_id} was not found.")
 
 
 _ENABLE_VALIDATION: bool = True
@@ -271,9 +278,10 @@ def _partition_and_lower_one_graph_module(
     for tag, delegation_spec in partition_result.partition_tags.items():
         # Create partition with nodes containing this tag. There should only be
         # one contained submodule per tag
-        node_list = _get_node_list_with_same_tag(
-            tagged_graph_module, tag, owning_program
-        )
+        with profile_scope("backend.collect_partition_nodes", tag=tag):
+            node_list = _get_node_list_with_same_tag(
+                tagged_graph_module, tag, owning_program
+            )
 
         if len(node_list) == 0:
             logging.debug(f"Did not find any nodes for tag {tag}")
@@ -289,10 +297,11 @@ def _partition_and_lower_one_graph_module(
             if not is_submodule
             else nullcontext()
         )
-        with replace_ctx:
-            submodule, call_module_node = create_submodule_from_nodes(
-                tagged_graph_module, node_list, tag
-            )
+        with profile_scope("backend.create_submodule_from_nodes", tag=tag):
+            with replace_ctx:
+                submodule, call_module_node = create_submodule_from_nodes(
+                    tagged_graph_module, node_list, tag
+                )
 
         tagged_graph_module_output_node = tagged_graph_module.graph.output_node()
         submodule_output_node = submodule.graph.output_node()
@@ -301,35 +310,43 @@ def _partition_and_lower_one_graph_module(
         submodule_output_node.meta = tagged_graph_module_output_node.meta
         logging.debug(f"Partitioned graph module: {tagged_graph_module}")
 
-        (
-            submodule_program,
-            toplevel_input_specs_to_delete,
-            toplevel_output_specs_to_delete,
-        ) = create_exported_program_from_submodule(
-            submodule,
-            owning_program,
-            tag,
-            call_module_node,
-            is_submodule,
-        )
+        with profile_scope("backend.create_exported_program_from_submodule", tag=tag):
+            (
+                submodule_program,
+                toplevel_input_specs_to_delete,
+                toplevel_output_specs_to_delete,
+            ) = create_exported_program_from_submodule(
+                submodule,
+                owning_program,
+                tag,
+                call_module_node,
+                is_submodule,
+            )
 
-        lowered_submodule = to_backend(
-            delegation_spec.backend_id,
-            submodule_program,
-            delegation_spec.compile_specs,
-        )
+        with profile_scope(
+            "backend.lower_partition_submodule",
+            tag=tag,
+            backend_id=delegation_spec.backend_id,
+        ):
+            lowered_submodule = to_backend(
+                delegation_spec.backend_id,
+                submodule_program,
+                delegation_spec.compile_specs,
+            )
 
-        _insert_lowered_submodule(
-            submodule_program,
-            owning_program,
-            call_module_node,
-            submodule_output_node,
-            lowered_submodule,
-            is_submodule,
-            toplevel_input_specs_to_delete,
-            toplevel_output_specs_to_delete,
-        )
-        owning_program._validate()
+        with profile_scope("backend.insert_lowered_submodule", tag=tag):
+            _insert_lowered_submodule(
+                submodule_program,
+                owning_program,
+                call_module_node,
+                submodule_output_node,
+                lowered_submodule,
+                is_submodule,
+                toplevel_input_specs_to_delete,
+                toplevel_output_specs_to_delete,
+            )
+        with profile_scope("backend.validate_after_insert", tag=tag):
+            owning_program._validate()
 
     return tagged_graph_module
 
@@ -389,60 +406,80 @@ def _(
     Returns:
         ExportedProgram: The input program, with some portions targeted for delegation.
     """
-    edge_program._validate()
+    with profile_scope(
+        "backend.partition_and_lower_exported_program",
+        partitioner=partitioner_instance.__class__.__name__,
+    ):
+        with profile_scope("backend.validate_input_program"):
+            edge_program._validate()
 
-    # Use fake program, with FakeTensors in the state dict, to avoid copying large constant values.
-    # Fall back to deepcopy if no fake mode is found. TODO(T182910699): Remove this fallback.
-    try:
-        fake_edge_program = get_fake_program(edge_program)
-    except Exception as e:
-        logging.warning(
-            f"Error in get_fake_program for graph {edge_program.graph_module}, fallback to deepcopy: {e}"
-        )
-        fake_edge_program = copy.deepcopy(edge_program)
-    partitioner_result = partitioner_instance(fake_edge_program)
-    tagged_exported_program = partitioner_result.tagged_exported_program
+        # Use fake program, with FakeTensors in the state dict, to avoid copying large constant values.
+        # Fall back to deepcopy if no fake mode is found. TODO(T182910699): Remove this fallback.
+        try:
+            with profile_scope("backend.get_fake_program"):
+                fake_edge_program = get_fake_program(edge_program)
+        except Exception as e:
+            logging.warning(
+                f"Error in get_fake_program for graph {edge_program.graph_module}, fallback to deepcopy: {e}"
+            )
+            with profile_scope("backend.deepcopy_program_for_partitioner"):
+                fake_edge_program = copy.deepcopy(edge_program)
+        with profile_scope("backend.run_partitioner"):
+            partitioner_result = partitioner_instance(fake_edge_program)
+        tagged_exported_program = partitioner_result.tagged_exported_program
 
-    # Check that the partitioner did not modify the original graph
-    if _ENABLE_VALIDATION:
-        assert is_identical_graph(
-            tagged_exported_program.graph_module,
-            edge_program.graph_module,
-        ), f"The partitioner {partitioner_instance} should not modify the graph module"
-    else:
-        logging.warning("Disabled validating the partitioner.")
+        # Check that the partitioner did not modify the original graph
+        if _ENABLE_VALIDATION:
+            with profile_scope("backend.validate_partitioner_identity"):
+                assert is_identical_graph(
+                    tagged_exported_program.graph_module,
+                    edge_program.graph_module,
+                ), f"The partitioner {partitioner_instance} should not modify the graph module"
+        else:
+            logging.warning("Disabled validating the partitioner.")
 
-    assert (
-        partitioner_result.partition_tags is not None
-    ), f"Partitioner {partitioner_instance} needs a `partition_tags` field containing a mapping of tags to delegate spec"
+        assert (
+            partitioner_result.partition_tags is not None
+        ), f"Partitioner {partitioner_instance} needs a `partition_tags` field containing a mapping of tags to delegate spec"
 
-    update_to_real_program(tagged_exported_program, edge_program)
+        with profile_scope("backend.update_to_real_program"):
+            update_to_real_program(tagged_exported_program, edge_program)
 
-    for tag, _ in partitioner_result.partition_tags.items():
-        _maybe_duplicate_constant_nodes(tagged_exported_program, tag)
+        with profile_scope(
+            "backend.duplicate_constant_nodes",
+            tags=len(partitioner_result.partition_tags),
+        ):
+            for tag, _ in partitioner_result.partition_tags.items():
+                _maybe_duplicate_constant_nodes(tagged_exported_program, tag)
 
-    tagged_graph_module = _partition_and_lower(
-        tagged_exported_program.graph_module,
-        partitioner_result,
-        tagged_exported_program,
-    )
+        with profile_scope(
+            "backend.partition_and_lower_graph_module",
+            tags=len(partitioner_result.partition_tags),
+        ):
+            tagged_graph_module = _partition_and_lower(
+                tagged_exported_program.graph_module,
+                partitioner_result,
+                tagged_exported_program,
+            )
 
-    # Partitioner added delegation tags to the graph module nodes,
-    # we make sure to remove them after we finished partition_and_lower
-    for node in tagged_graph_module.graph.nodes:
-        node.meta.pop("delegation_tag", None)
+        # Partitioner added delegation tags to the graph module nodes,
+        # we make sure to remove them after we finished partition_and_lower
+        with profile_scope("backend.clear_delegation_tags"):
+            for node in tagged_graph_module.graph.nodes:
+                node.meta.pop("delegation_tag", None)
 
-    return ExportedProgram(
-        root=tagged_graph_module,
-        graph=tagged_graph_module.graph,
-        graph_signature=tagged_exported_program.graph_signature,
-        state_dict=tagged_exported_program.state_dict,
-        range_constraints=copy.deepcopy(tagged_exported_program.range_constraints),
-        module_call_graph=copy.deepcopy(tagged_exported_program.module_call_graph),
-        example_inputs=None,
-        constants=tagged_exported_program.constants,
-        verifiers=[tagged_exported_program.verifier],
-    )
+        with profile_scope("backend.construct_partitioned_exported_program"):
+            return ExportedProgram(
+                root=tagged_graph_module,
+                graph=tagged_graph_module.graph,
+                graph_signature=tagged_exported_program.graph_signature,
+                state_dict=tagged_exported_program.state_dict,
+                range_constraints=copy.deepcopy(tagged_exported_program.range_constraints),
+                module_call_graph=copy.deepcopy(tagged_exported_program.module_call_graph),
+                example_inputs=None,
+                constants=tagged_exported_program.constants,
+                verifiers=[tagged_exported_program.verifier],
+            )
 
 
 def _create_partitions_in_graph_module(
@@ -455,9 +492,10 @@ def _create_partitions_in_graph_module(
     for tag, delegation_spec in partition_result.partition_tags.items():
         # Create partition with nodes containing this tag. There should only be
         # one contained submodule per tag
-        node_list = _get_node_list_with_same_tag(
-            tagged_graph_module, tag, owning_program
-        )
+        with profile_scope("backend.batch.collect_partition_nodes", tag=tag):
+            node_list = _get_node_list_with_same_tag(
+                tagged_graph_module, tag, owning_program
+            )
 
         if len(node_list) == 0:
             logging.debug(f"Did not find any nodes for tag {tag}")
@@ -473,26 +511,30 @@ def _create_partitions_in_graph_module(
             if not is_submodule
             else nullcontext()
         )
-        with replace_ctx:
-            submodule, call_module_node = create_submodule_from_nodes(
-                tagged_graph_module, node_list, tag
-            )
+        with profile_scope("backend.batch.create_submodule_from_nodes", tag=tag):
+            with replace_ctx:
+                submodule, call_module_node = create_submodule_from_nodes(
+                    tagged_graph_module, node_list, tag
+                )
 
         submodule_output_node = submodule.graph.output_node()
         # Copy the output node meta from the original output node, because
         # create_submodule_from_nodes doesn't cover the meta field
         logging.debug(f"Partitioned graph module: {tagged_graph_module}")
-        (
-            submodule_program,
-            toplevel_input_specs_to_delete,
-            toplevel_output_specs_to_delete,
-        ) = create_exported_program_from_submodule(
-            submodule,
-            owning_program,
-            tag,
-            call_module_node,
-            is_submodule,
-        )
+        with profile_scope(
+            "backend.batch.create_exported_program_from_submodule", tag=tag
+        ):
+            (
+                submodule_program,
+                toplevel_input_specs_to_delete,
+                toplevel_output_specs_to_delete,
+            ) = create_exported_program_from_submodule(
+                submodule,
+                owning_program,
+                tag,
+                call_module_node,
+                is_submodule,
+            )
         call_module_node.meta["backend_id"] = delegation_spec.backend_id
         call_module_node.meta["compile_spec"] = delegation_spec.compile_specs
         call_module_node.meta["submodule_program"] = submodule_program
@@ -516,11 +558,12 @@ def _create_partitions_in_graph_module(
             call_module_node.target
         )
 
-    created_submodule_nodes = {key: [] for key in backend_id_to_submodule_name.keys()}
-    for backend_id, submodule_name in backend_id_to_submodule_name.items():
-        for node in tagged_graph_module.graph.nodes:
-            if node.op == "call_module" and node.target in submodule_name:
-                created_submodule_nodes[backend_id].append(node)
+    with profile_scope("backend.batch.resolve_created_submodule_nodes"):
+        created_submodule_nodes = {key: [] for key in backend_id_to_submodule_name.keys()}
+        for backend_id, submodule_name in backend_id_to_submodule_name.items():
+            for node in tagged_graph_module.graph.nodes:
+                if node.op == "call_module" and node.target in submodule_name:
+                    created_submodule_nodes[backend_id].append(node)
 
     # check the number of submodule_names and submodule_nodes are equal
     for backend_id in created_submodule_nodes.keys():
@@ -537,25 +580,26 @@ def _create_partitions(
     owning_program: ExportedProgram,
     is_submodule: bool = False,
 ) -> Dict[str, List[torch.fx.Node]]:
-    backend_id_to_call_submodules = _create_partitions_in_graph_module(
-        tagged_graph_module, partition_result, owning_program, is_submodule
-    )
-
-    # Recursively partition and lower for submodules
-    for _, submod, _ in get_control_flow_submodules(tagged_graph_module):
-        nested_backend_id_to_call_submodules = _create_partitions(
-            submod, partition_result, owning_program, is_submodule=True
+    with profile_scope("backend.batch.create_partitions", is_submodule=is_submodule):
+        backend_id_to_call_submodules = _create_partitions_in_graph_module(
+            tagged_graph_module, partition_result, owning_program, is_submodule
         )
-        for (
-            backend_id,
-            nested_submodules,
-        ) in nested_backend_id_to_call_submodules.items():
-            if backend_id not in backend_id_to_call_submodules:
-                backend_id_to_call_submodules[backend_id] = nested_submodules
-            else:
-                backend_id_to_call_submodules[backend_id].extend(nested_submodules)
 
-    return backend_id_to_call_submodules
+        # Recursively partition and lower for submodules
+        for _, submod, _ in get_control_flow_submodules(tagged_graph_module):
+            nested_backend_id_to_call_submodules = _create_partitions(
+                submod, partition_result, owning_program, is_submodule=True
+            )
+            for (
+                backend_id,
+                nested_submodules,
+            ) in nested_backend_id_to_call_submodules.items():
+                if backend_id not in backend_id_to_call_submodules:
+                    backend_id_to_call_submodules[backend_id] = nested_submodules
+                else:
+                    backend_id_to_call_submodules[backend_id].extend(nested_submodules)
+
+        return backend_id_to_call_submodules
 
 
 def lower_all_submodules_to_backend(
@@ -566,78 +610,84 @@ def lower_all_submodules_to_backend(
     """
     Lower all submodules nodes given in the method_to_submodule_nodes map to backend_id.
     """
-    # The created exported program for the submodules are in the call_module node's meta data
-    # We just map the method_to_submodule_nodes directly to the method_to_partitioned_exported_programs
-    method_to_partitioned_program = {
-        method_name: [
-            # perform deep copy here in case backends change graph inside preprocess method
-            copy.deepcopy(node.meta["submodule_program"])
-            for node in call_submodule_nodes
-        ]
-        for method_name, call_submodule_nodes in method_to_submodules_nodes.items()
-    }
-    method_to_compile_specs = {
-        method_name: [node.meta["compile_spec"] for node in call_submodule_nodes]
-        for method_name, call_submodule_nodes in method_to_submodules_nodes.items()
-    }
-
-    backend_name_to_subclass = {
-        subclass.__name__: subclass for subclass in BackendDetails.__subclasses__()
-    }
-    if backend_id not in backend_name_to_subclass:
-        raise NotImplementedError(f"Backend {backend_id} was not found.")
-
-    method_to_preprocess_result: dict[str, List[PreprocessResult]] = (
-        backend_name_to_subclass[backend_id].preprocess_multimethod(
-            method_to_partitioned_program, method_to_compile_specs
-        )
-    )
-
-    for method_name in method_to_preprocess_result.keys():
-        owning_program = method_to_tagged_edge_program[method_name]
-        list_of_preprocess_results = method_to_preprocess_result[method_name]
-        list_of_call_submodule_nodes = method_to_submodules_nodes[method_name]
-        list_of_compile_specs = method_to_compile_specs[method_name]
-        for preprocess_result, call_submodule_node, compile_spec in zip(
-            list_of_preprocess_results,
-            list_of_call_submodule_nodes,
-            list_of_compile_specs,
-        ):
-            submodule_program = call_submodule_node.meta["submodule_program"]
-            lowered_module = LoweredBackendModule(
-                edge_program=submodule_program,
-                backend_id=backend_id,
-                processed_bytes=preprocess_result.processed_bytes,
-                compile_specs=compile_spec,
-                named_data_store_output=preprocess_result.data_store_output,
-            )
-            lowered_module.meta = {
-                "debug_handle_map": preprocess_result.debug_handle_map,
+    with profile_scope("backend.batch.lower_all_submodules", backend_id=backend_id):
+        # The created exported program for the submodules are in the call_module node's meta data
+        # We just map the method_to_submodule_nodes directly to the method_to_partitioned_exported_programs
+        with profile_scope("backend.batch.deepcopy_submodule_programs"):
+            method_to_partitioned_program = {
+                method_name: [
+                    # perform deep copy here in case backends change graph inside preprocess method
+                    copy.deepcopy(node.meta["submodule_program"])
+                    for node in call_submodule_nodes
+                ]
+                for method_name, call_submodule_nodes in method_to_submodules_nodes.items()
             }
-            if preprocess_result._delegate_info_meta is not None:
-                assert lowered_module.meta is not None
-                lowered_module.meta["_delegate_info_meta"] = (
-                    preprocess_result._delegate_info_meta
-                )
-            is_submodule = call_submodule_node.meta["is_submodule"]
-            toplevel_input_specs_to_delete = call_submodule_node.meta[
-                "toplevel_input_specs_to_delete"
-            ]
-            toplevel_output_specs_to_delete = call_submodule_node.meta[
-                "toplevel_output_specs_to_delete"
-            ]
-            submodule_output_node = call_submodule_node.meta["submodule_output_node"]
+        method_to_compile_specs = {
+            method_name: [node.meta["compile_spec"] for node in call_submodule_nodes]
+            for method_name, call_submodule_nodes in method_to_submodules_nodes.items()
+        }
 
-            _insert_lowered_submodule(
-                submodule_program,
-                owning_program,
-                call_submodule_node,
-                submodule_output_node,
-                lowered_module,
-                is_submodule,
-                toplevel_input_specs_to_delete,
-                toplevel_output_specs_to_delete,
+        backend_name_to_subclass = {
+            subclass.__name__: subclass for subclass in BackendDetails.__subclasses__()
+        }
+        if backend_id not in backend_name_to_subclass:
+            raise NotImplementedError(f"Backend {backend_id} was not found.")
+
+        with profile_scope("backend.batch.preprocess_multimethod", backend_id=backend_id):
+            method_to_preprocess_result: dict[str, List[PreprocessResult]] = (
+                backend_name_to_subclass[backend_id].preprocess_multimethod(
+                    method_to_partitioned_program, method_to_compile_specs
+                )
             )
+
+        with profile_scope("backend.batch.insert_lowered_submodules", backend_id=backend_id):
+            for method_name in method_to_preprocess_result.keys():
+                owning_program = method_to_tagged_edge_program[method_name]
+                list_of_preprocess_results = method_to_preprocess_result[method_name]
+                list_of_call_submodule_nodes = method_to_submodules_nodes[method_name]
+                list_of_compile_specs = method_to_compile_specs[method_name]
+                for preprocess_result, call_submodule_node, compile_spec in zip(
+                    list_of_preprocess_results,
+                    list_of_call_submodule_nodes,
+                    list_of_compile_specs,
+                ):
+                    submodule_program = call_submodule_node.meta["submodule_program"]
+                    lowered_module = LoweredBackendModule(
+                        edge_program=submodule_program,
+                        backend_id=backend_id,
+                        processed_bytes=preprocess_result.processed_bytes,
+                        compile_specs=compile_spec,
+                        named_data_store_output=preprocess_result.data_store_output,
+                    )
+                    lowered_module.meta = {
+                        "debug_handle_map": preprocess_result.debug_handle_map,
+                    }
+                    if preprocess_result._delegate_info_meta is not None:
+                        assert lowered_module.meta is not None
+                        lowered_module.meta["_delegate_info_meta"] = (
+                            preprocess_result._delegate_info_meta
+                        )
+                    is_submodule = call_submodule_node.meta["is_submodule"]
+                    toplevel_input_specs_to_delete = call_submodule_node.meta[
+                        "toplevel_input_specs_to_delete"
+                    ]
+                    toplevel_output_specs_to_delete = call_submodule_node.meta[
+                        "toplevel_output_specs_to_delete"
+                    ]
+                    submodule_output_node = call_submodule_node.meta[
+                        "submodule_output_node"
+                    ]
+
+                    _insert_lowered_submodule(
+                        submodule_program,
+                        owning_program,
+                        call_submodule_node,
+                        submodule_output_node,
+                        lowered_module,
+                        is_submodule,
+                        toplevel_input_specs_to_delete,
+                        toplevel_output_specs_to_delete,
+                    )
 
 
 def remove_used_metadata(graph: torch.fx.Graph) -> None:
@@ -698,97 +748,137 @@ def _(
     method_to_edge_program = method_edge_program_partitioners.method_to_edge_program
     method_to_partitioner = method_edge_program_partitioners.method_to_partitioner
 
-    partitioned_and_lowered_exported_programs = {}
-    backend_id_to_method_submodules_map = {}
-    method_to_tagged_exported_program = {}
+    with profile_scope("backend.batch.to_backend", methods=len(method_to_edge_program)):
+        partitioned_and_lowered_exported_programs = {}
+        backend_id_to_method_submodules_map = {}
+        method_to_tagged_exported_program = {}
 
-    for method_name, partitioner_instance in method_to_partitioner.items():
-        assert (
-            method_name in method_to_edge_program
-        ), f"Partitioner for method {method_name} is not provided"
-        edge_program = method_to_edge_program[method_name]
-        edge_program._validate()
+        for method_name, partitioner_instance in method_to_partitioner.items():
+            assert (
+                method_name in method_to_edge_program
+            ), f"Partitioner for method {method_name} is not provided"
+            edge_program = method_to_edge_program[method_name]
+            with profile_scope("backend.batch.validate_input_program", method=method_name):
+                edge_program._validate()
 
-        # Use fake program, with FakeTensors in the state dict, to avoid copying large constant values.
-        # Fall back to deepcopy if no fake mode is found. TODO(T182910699): Remove this fallback.
-        try:
-            fake_edge_program = get_fake_program(edge_program)
-        except Exception as e:
-            logging.warning(
-                f"Error in get_fake_program for graph {edge_program.graph_module}, fallback to deepcopy: {e}"
-            )
-            fake_edge_program = copy.deepcopy(edge_program)
-        partitioner_result = partitioner_instance(fake_edge_program)
-        tagged_exported_program = partitioner_result.tagged_exported_program
-        method_to_tagged_exported_program[method_name] = tagged_exported_program
+            # Use fake program, with FakeTensors in the state dict, to avoid copying large constant values.
+            # Fall back to deepcopy if no fake mode is found. TODO(T182910699): Remove this fallback.
+            try:
+                with profile_scope("backend.batch.get_fake_program", method=method_name):
+                    fake_edge_program = get_fake_program(edge_program)
+            except Exception as e:
+                logging.warning(
+                    f"Error in get_fake_program for graph {edge_program.graph_module}, fallback to deepcopy: {e}"
+                )
+                with profile_scope(
+                    "backend.batch.deepcopy_program_for_partitioner",
+                    method=method_name,
+                ):
+                    fake_edge_program = copy.deepcopy(edge_program)
+            with profile_scope(
+                "backend.batch.run_partitioner",
+                method=method_name,
+                partitioner=partitioner_instance.__class__.__name__,
+            ):
+                partitioner_result = partitioner_instance(fake_edge_program)
+            tagged_exported_program = partitioner_result.tagged_exported_program
+            method_to_tagged_exported_program[method_name] = tagged_exported_program
 
-        # Check that the partitioner did not modify the original graph
-        if _ENABLE_VALIDATION:
-            assert is_identical_graph(
-                tagged_exported_program.graph_module,
-                edge_program.graph_module,
-            ), f"The partitioner {partitioner_instance} should not modify the graph module"
-        else:
-            logging.warning("Disabled validating the partitioner.")
+            # Check that the partitioner did not modify the original graph
+            if _ENABLE_VALIDATION:
+                with profile_scope(
+                    "backend.batch.validate_partitioner_identity", method=method_name
+                ):
+                    assert is_identical_graph(
+                        tagged_exported_program.graph_module,
+                        edge_program.graph_module,
+                    ), f"The partitioner {partitioner_instance} should not modify the graph module"
+            else:
+                logging.warning("Disabled validating the partitioner.")
 
-        assert (
-            partitioner_result.partition_tags is not None
-        ), f"Partitioner {partitioner_instance} needs a `partition_tags` field containing a mapping of tags to delegate spec"
+            assert (
+                partitioner_result.partition_tags is not None
+            ), f"Partitioner {partitioner_instance} needs a `partition_tags` field containing a mapping of tags to delegate spec"
 
-        update_to_real_program(tagged_exported_program, edge_program)
+            with profile_scope("backend.batch.update_to_real_program", method=method_name):
+                update_to_real_program(tagged_exported_program, edge_program)
 
-        for tag, _ in partitioner_result.partition_tags.items():
-            _maybe_duplicate_constant_nodes(tagged_exported_program, tag)
+            with profile_scope(
+                "backend.batch.duplicate_constant_nodes",
+                method=method_name,
+                tags=len(partitioner_result.partition_tags),
+            ):
+                for tag, _ in partitioner_result.partition_tags.items():
+                    _maybe_duplicate_constant_nodes(tagged_exported_program, tag)
 
-        backend_id_to_call_submodule_nodes = _create_partitions(
-            tagged_exported_program.graph_module,
-            partitioner_result,
-            tagged_exported_program,
-        )
+            with profile_scope(
+                "backend.batch.create_all_partitions",
+                method=method_name,
+                tags=len(partitioner_result.partition_tags),
+            ):
+                backend_id_to_call_submodule_nodes = _create_partitions(
+                    tagged_exported_program.graph_module,
+                    partitioner_result,
+                    tagged_exported_program,
+                )
+            for (
+                backend_id,
+                call_submodule_nodes,
+            ) in backend_id_to_call_submodule_nodes.items():
+                if backend_id not in backend_id_to_method_submodules_map:
+                    backend_id_to_method_submodules_map[backend_id] = {}
+                backend_id_to_method_submodules_map[backend_id][
+                    method_name
+                ] = call_submodule_nodes
+
         for (
             backend_id,
-            call_submodule_nodes,
-        ) in backend_id_to_call_submodule_nodes.items():
-            if backend_id not in backend_id_to_method_submodules_map:
-                backend_id_to_method_submodules_map[backend_id] = {}
-            backend_id_to_method_submodules_map[backend_id][
-                method_name
-            ] = call_submodule_nodes
-
-    for (
-        backend_id,
-        method_to_submodule_nodes,
-    ) in backend_id_to_method_submodules_map.items():
-        lower_all_submodules_to_backend(
-            backend_id,
             method_to_submodule_nodes,
-            method_to_tagged_exported_program,
-        )
-
-    for method_name in method_to_edge_program.keys():
-        if method_name in method_to_tagged_exported_program:
-            tagged_exported_program = method_to_tagged_exported_program[method_name]
-            tagged_exported_program._validate()
-            remove_used_metadata(tagged_exported_program.graph_module.graph)
-            partitioned_and_lowered_exported_programs[method_name] = ExportedProgram(
-                root=tagged_exported_program.graph_module,
-                graph=tagged_exported_program.graph_module.graph,
-                graph_signature=tagged_exported_program.graph_signature,
-                state_dict=tagged_exported_program.state_dict,
-                range_constraints=copy.deepcopy(
-                    tagged_exported_program.range_constraints
-                ),
-                module_call_graph=copy.deepcopy(
-                    tagged_exported_program.module_call_graph
-                ),
-                example_inputs=None,
-                constants=tagged_exported_program.constants,
-                verifiers=[tagged_exported_program.verifier],
-            )
-        else:
-            # this edge program wasn't partitioned, so we can just return it as is
-            partitioned_and_lowered_exported_programs[method_name] = (
-                method_to_edge_program[method_name]
+        ) in backend_id_to_method_submodules_map.items():
+            lower_all_submodules_to_backend(
+                backend_id,
+                method_to_submodule_nodes,
+                method_to_tagged_exported_program,
             )
 
-    return partitioned_and_lowered_exported_programs
+        with profile_scope("backend.batch.construct_outputs"):
+            for method_name in method_to_edge_program.keys():
+                if method_name in method_to_tagged_exported_program:
+                    tagged_exported_program = method_to_tagged_exported_program[
+                        method_name
+                    ]
+                    with profile_scope(
+                        "backend.batch.validate_output_program", method=method_name
+                    ):
+                        tagged_exported_program._validate()
+                    with profile_scope(
+                        "backend.batch.remove_used_metadata", method=method_name
+                    ):
+                        remove_used_metadata(tagged_exported_program.graph_module.graph)
+                    with profile_scope(
+                        "backend.batch.construct_exported_program", method=method_name
+                    ):
+                        partitioned_and_lowered_exported_programs[
+                            method_name
+                        ] = ExportedProgram(
+                            root=tagged_exported_program.graph_module,
+                            graph=tagged_exported_program.graph_module.graph,
+                            graph_signature=tagged_exported_program.graph_signature,
+                            state_dict=tagged_exported_program.state_dict,
+                            range_constraints=copy.deepcopy(
+                                tagged_exported_program.range_constraints
+                            ),
+                            module_call_graph=copy.deepcopy(
+                                tagged_exported_program.module_call_graph
+                            ),
+                            example_inputs=None,
+                            constants=tagged_exported_program.constants,
+                            verifiers=[tagged_exported_program.verifier],
+                        )
+                else:
+                    # this edge program wasn't partitioned, so we can just return it as is
+                    partitioned_and_lowered_exported_programs[method_name] = (
+                        method_to_edge_program[method_name]
+                    )
+
+        return partitioned_and_lowered_exported_programs

@@ -1320,6 +1320,19 @@ def count_tosa_ops(graph_module: torch.fx.GraphModule, expected_ops: Dict[str, i
                 )
 
 
+def count_tosa_ops_at_most(
+    graph_module: torch.fx.GraphModule, max_ops: Dict[str, int]
+):
+    """Asserts upper bounds for TOSA operator counts in a partitioned module."""
+    op_counts = dict(_get_tosa_operator_distribution(graph_module))
+    for op, max_count in max_ops.items():
+        actual_count = op_counts.get(op, 0)
+        if actual_count > max_count:
+            raise AssertionError(
+                f"Expected at most {max_count} occurrences of TOSA op {op} but found {actual_count}."
+            )
+
+
 def count_program_io_kinds(
     exported_program: ExportedProgram,
     expected_input_kinds: dict[InputKind, int] | None,

@@ -23,6 +23,7 @@ from executorch.exir._serialize._named_data_store import (
 )
 from executorch.exir._serialize._serialize import serialize_for_executorch
 from executorch.exir._serialize.data_serializer import DataSerializer
+from executorch.exir._lowering_profile import profile_scope
 from executorch.exir._warnings import experimental
 from executorch.exir.backend.backend_api import (
     MethodProgramsPartitionerSpec,
@@ -81,8 +82,8 @@ from executorch.exir.verification.verifier import (
     EXIREdgeDialectVerifier,
     get_aten_verifier,
 )
-from torch._export.passes import ReplaceViewOpsWithViewCopyOpsPass
 from torch._export.utils import _detect_fake_mode_from_gm
+from torch._export.passes import ReplaceViewOpsWithViewCopyOpsPass
 from torch._export.verifier import Verifier
 from torch.export import ExportedProgram
 from torch.export._remove_auto_functionalized_pass import (
@@ -326,6 +327,8 @@ def _update_exported_program_graph_module(
 
 
 def _copy_module(new_prog, new_gm):
+    if new_prog is new_gm:
+        return
     new_prog.meta.update(new_gm.meta)
     new_prog.graph = new_gm.graph
     submodules = [name for name, _ in new_prog.named_children()]
@@ -898,59 +901,82 @@ def _generate_edge_program(
     Returns:
         An ExportedProgram in edge dialect.
     """
-    # Remove unused parameters
-    program = remove_unused_parameters_pass(program)
+    with profile_scope("exir.generate_edge_program.inner"):
+        # Remove unused parameters
+        with profile_scope("exir.generate_edge_program.remove_unused_parameters"):
+            program = remove_unused_parameters_pass(program)
 
-    pre_op_replace_passes, post_op_replace_passes = _get_aten_to_edge_passes(config)
-
-    passes = [
-        # Remove invalid assert ops, such as _assert_tensor_metadata
-        RemoveNonCoreAtenOpGraphAssertsPass(),
-        # TODO move inside aten_to_edge passes after all users are migrated off v1 capture
-        ReplaceViewOpsWithViewCopyOpsPass(),
-    ]
-    passes.extend(pre_op_replace_passes)
-    if config._use_edge_ops:
-        passes.append(OpReplacePass())
-        if not config._skip_dim_order:
-            passes.append(MemoryFormatOpsPass())
-
-    gm = program.graph_module
-    for p in passes:
-        gm_res = p(gm)
-        assert gm_res is not None
-        gm = gm_res.graph_module
-
-    edge_program = ExportedProgram(
-        root=gm,
-        graph=gm.graph,
-        graph_signature=_get_updated_graph_signature(program.graph_signature, gm),
-        state_dict=program.state_dict,
-        range_constraints=program.range_constraints,
-        module_call_graph=program.module_call_graph,
-        example_inputs=program.example_inputs,
-        constants=program.constants,
-        verifiers=[
-            EXIREdgeDialectVerifier(
-                edge_compile_config=config,
-                class_only=True,
-                core_aten_ops_exception_list=core_aten_ops_exception_list,
-                preserve_ops=preserve_ops,
+        with profile_scope("exir.generate_edge_program.get_aten_to_edge_passes"):
+            pre_op_replace_passes, post_op_replace_passes = _get_aten_to_edge_passes(
+                config
             )
-        ],
-    )
 
-    # Lift the tensor constants created in ScalarToTensorPass
-    edge_program = lift_constant_tensor_pass(edge_program)
+        passes = [
+            # Remove invalid assert ops, such as _assert_tensor_metadata
+            RemoveNonCoreAtenOpGraphAssertsPass(),
+            # TODO move inside aten_to_edge passes after all users are migrated off v1 capture
+            ReplaceViewOpsWithViewCopyOpsPass(),
+        ]
+        passes.extend(pre_op_replace_passes)
+        if config._use_edge_ops:
+            passes.append(OpReplacePass())
 
-    # Normalize constant tensor dim order on the unlifted graph
-    edge_program = convert_constant_dim_order_pass.convert_constant_dim_order_pass(
-        edge_program
-    )
+        gm = program.graph_module
+        for p in passes:
+            with profile_scope(
+                "exir.generate_edge_program.pass",
+                pass_name=p.__class__.__name__,
+            ):
+                gm_res = p(gm)
+            assert gm_res is not None
+            gm = gm_res.graph_module
 
-    edge_program = _transform(edge_program, *post_op_replace_passes)
+        if config._use_edge_ops and not config._skip_dim_order:
+            with profile_scope(
+                "exir.generate_edge_program.pass",
+                pass_name=MemoryFormatOpsPass.__name__,
+            ):
+                gm_res = MemoryFormatOpsPass()(gm)
+            assert gm_res is not None
+            gm = gm_res.graph_module
 
-    return edge_program
+        with profile_scope("exir.generate_edge_program.construct_exported_program"):
+            edge_program = ExportedProgram(
+                root=gm,
+                graph=gm.graph,
+                graph_signature=_get_updated_graph_signature(program.graph_signature, gm),
+                state_dict=program.state_dict,
+                range_constraints=program.range_constraints,
+                module_call_graph=program.module_call_graph,
+                example_inputs=program.example_inputs,
+                constants=program.constants,
+                verifiers=[
+                    EXIREdgeDialectVerifier(
+                        edge_compile_config=config,
+                        class_only=True,
+                        core_aten_ops_exception_list=core_aten_ops_exception_list,
+                        preserve_ops=preserve_ops,
+                    )
+                ],
+            )
+
+        # Lift the tensor constants created in ScalarToTensorPass
+        with profile_scope("exir.generate_edge_program.lift_constant_tensor"):
+            edge_program = lift_constant_tensor_pass(edge_program)
+
+        # Normalize constant tensor dim order on the unlifted graph
+        with profile_scope("exir.generate_edge_program.convert_constant_dim_order"):
+            edge_program = convert_constant_dim_order_pass.convert_constant_dim_order_pass(
+                edge_program
+            )
+
+        with profile_scope(
+            "exir.generate_edge_program.post_op_replace_transform",
+            passes=len(post_op_replace_passes),
+        ):
+            edge_program = _transform(edge_program, *post_op_replace_passes)
+
+        return edge_program
 
 
 def _replace_aten_ops_with_transformed_ops(
@@ -1271,82 +1297,116 @@ def _gen_edge_manager_for_partitioners_default(
     """
     ops_set_to_not_decompose_by_program = defaultdict(list)
     edge_programs: Dict[str, ExportedProgram] = {}
-    for name, program in aten_programs.items():
-        # Functionalize program before asking partitioners to preserve ops
-        program = program.run_decompositions({})
+    with profile_scope(
+        "exir.gen_edge_manager_for_partitioners",
+        methods=len(aten_programs),
+    ):
+        for name, program in aten_programs.items():
+            with profile_scope("exir.initial_empty_decomposition", method=name):
+                program = program.run_decompositions({})
 
-        if partitioner is not None:
-            partitioners_for_program = partitioner.get(name, [])
-            final_ops_to_preserve = set()
+            if partitioner is not None:
+                partitioners_for_program = partitioner.get(name, [])
+                final_ops_to_preserve = set()
 
-            # Decompose by default if there are no partitioners for the method
-            if not partitioners_for_program:
-                table = _default_decomposition_table()
-                for op in config.preserve_ops:
-                    table.pop(op, None)
-                program = program.run_decompositions(table)
-
-            # Process each partitioner individually using their specific requirements
-            for curr_partitioner in partitioners_for_program:
-                curr_ops_no_decomp, _ = curr_partitioner.ops_to_not_decompose(program)
-
-                # Check if this partitioner can skip using EDGE_DO_NOT_DECOMP
-                can_skip_using_edge_do_not_decomp = _can_skip_using_EDGE_DO_NOT_DECOMP(
-                    curr_partitioner, program
-                )
-
-                if can_skip_using_edge_do_not_decomp:
-                    # Preserve all ops in curr_ops_no_decomp from decomposition
+                # Decompose by default if there are no partitioners for the method
+                if not partitioners_for_program:
                     table = _default_decomposition_table()
-                    ops_needing_preservation = []
-
-                    for op in curr_ops_no_decomp:
-                        if table.pop(op, None) is not None:
-                            ops_needing_preservation.append(op)
-
-                    program = program.run_decompositions(table)
-                    final_ops_to_preserve.update(ops_needing_preservation)
-                else:
-                    # EDGE_DO_NOT_DECOMP path for the partitioner
-                    curr_ops_no_decomp = _remove_invalid_ops_for_not_decompose(
-                        curr_ops_no_decomp
-                    )
-
-                    # Apply decompositions with this partitioner's preserved ops
-                    table = _default_decomposition_table()
-                    for op in curr_ops_no_decomp:
+                    for op in config.preserve_ops:
                         table.pop(op, None)
+                    with profile_scope("exir.default_decomposition", method=name):
+                        program = program.run_decompositions(table)
 
-                    # First pass of decompositions with this partitioner's preserved ops
-                    program = program.run_decompositions(table)
-
-                    # Filter ops using EDGE_DO_NOT_DECOMP
-                    temp_partitioner_dict = {name: [curr_partitioner]}
-                    preserved_ops = (
-                        _replace_aten_ops_with_transformed_ops(
-                            name, program, temp_partitioner_dict
+                # Process each partitioner individually using their specific requirements
+                for curr_partitioner in partitioners_for_program:
+                    with profile_scope(
+                        "exir.partitioner_ops_to_not_decompose",
+                        method=name,
+                        partitioner=curr_partitioner.__class__.__name__,
+                    ):
+                        curr_ops_no_decomp, _ = curr_partitioner.ops_to_not_decompose(
+                            program
                         )
-                        or []
+
+                    # Check if this partitioner can skip using EDGE_DO_NOT_DECOMP
+                    can_skip_using_edge_do_not_decomp = _can_skip_using_EDGE_DO_NOT_DECOMP(
+                        curr_partitioner, program
                     )
-                    final_ops_to_preserve.update(preserved_ops)
 
-                    # Decompose no-decomp ops rejected by the support filter. If every
-                    # remaining candidate was rewritten into EDGE_DO_NOT_DECOMP, the
-                    # full-table pass is a no-op and costs a complete graph rewrite.
-                    if _has_untransformed_no_decomp_ops(program, curr_ops_no_decomp):
-                        program = program.run_decompositions(
-                            _default_decomposition_table()
+                    if can_skip_using_edge_do_not_decomp:
+                        # Preserve all ops in curr_ops_no_decomp from decomposition
+                        table = _default_decomposition_table()
+                        ops_needing_preservation = []
+
+                        for op in curr_ops_no_decomp:
+                            if table.pop(op, None) is not None:
+                                ops_needing_preservation.append(op)
+
+                        with profile_scope(
+                            "exir.preserve_decomposition",
+                            method=name,
+                            partitioner=curr_partitioner.__class__.__name__,
+                        ):
+                            program = program.run_decompositions(table)
+                        final_ops_to_preserve.update(ops_needing_preservation)
+                    else:
+                        # EDGE_DO_NOT_DECOMP path for the partitioner
+                        curr_ops_no_decomp = _remove_invalid_ops_for_not_decompose(
+                            curr_ops_no_decomp
                         )
 
-                    # Restore ops from edge_no_decomp_namespace to aten ops
-                    _restore_transformed_ops_to_aten_ops(program)
-            ops_set_to_not_decompose_by_program[name].extend(final_ops_to_preserve)
+                        # Apply decompositions with this partitioner's preserved ops
+                        table = _default_decomposition_table()
+                        for op in curr_ops_no_decomp:
+                            table.pop(op, None)
 
-        edge_programs[name] = _generate_edge_program(
-            config,
-            program,
-            preserve_ops=ops_set_to_not_decompose_by_program.get(name, []),
-        )
+                        with profile_scope(
+                            "exir.edge_do_not_decomp_first_decomposition",
+                            method=name,
+                            partitioner=curr_partitioner.__class__.__name__,
+                        ):
+                            program = program.run_decompositions(table)
+
+                        with profile_scope(
+                            "exir.replace_aten_ops_with_transformed_ops",
+                            method=name,
+                            partitioner=curr_partitioner.__class__.__name__,
+                        ):
+                            preserved_ops = (
+                                _replace_aten_ops_with_transformed_ops(
+                                    name, program, {name: [curr_partitioner]}
+                                )
+                                or []
+                            )
+                        final_ops_to_preserve.update(preserved_ops)
+
+                        # Decompose no-decomp ops rejected by the support filter. If every
+                        # remaining candidate was rewritten into EDGE_DO_NOT_DECOMP, the
+                        # full-table pass is a no-op and costs a complete graph rewrite.
+                        if _has_untransformed_no_decomp_ops(program, curr_ops_no_decomp):
+                            with profile_scope(
+                                "exir.edge_do_not_decomp_second_decomposition",
+                                method=name,
+                                partitioner=curr_partitioner.__class__.__name__,
+                            ):
+                                program = program.run_decompositions(
+                                    _default_decomposition_table()
+                                )
+
+                        with profile_scope(
+                            "exir.restore_transformed_ops_to_aten_ops",
+                            method=name,
+                            partitioner=curr_partitioner.__class__.__name__,
+                        ):
+                            _restore_transformed_ops_to_aten_ops(program)
+                ops_set_to_not_decompose_by_program[name].extend(final_ops_to_preserve)
+
+            with profile_scope("exir.generate_edge_program", method=name):
+                edge_programs[name] = _generate_edge_program(
+                    config,
+                    program,
+                    preserve_ops=ops_set_to_not_decompose_by_program.get(name, []),
+                )
 
     # Merge ops_to_not_decompose into config so that downstream calls (e.g.
     # EdgeProgramManager.transform()) carry the exception list through their
@@ -1383,22 +1443,30 @@ def _gen_edge_manager_for_partitioners(
 ) -> "EdgeProgramManager":
     override = get_edge_manager_for_partitioners_override()
     if override is not None:
-        return override(
-            _gen_edge_manager_for_partitioners_default,
+        with profile_scope(
+            "exir.gen_edge_manager_for_partitioners_override",
+            methods=len(aten_programs),
+        ):
+            return override(
+                _gen_edge_manager_for_partitioners_default,
+                partitioner,
+                aten_programs,
+                config,
+                constant_methods,
+                bool(generate_etrecord),
+            )
+
+    with profile_scope(
+        "exir.gen_edge_manager_for_partitioners_dispatch",
+        methods=len(aten_programs),
+    ):
+        return _gen_edge_manager_for_partitioners_default(
             partitioner,
             aten_programs,
             config,
             constant_methods,
-            bool(generate_etrecord),
+            generate_etrecord,
         )
-
-    return _gen_edge_manager_for_partitioners_default(
-        partitioner,
-        aten_programs,
-        config,
-        constant_methods,
-        generate_etrecord,
-    )
 
 
 def _maybe_direct_lower_with_partitioners(
@@ -1421,23 +1489,30 @@ def _maybe_direct_lower_with_partitioners(
         return None, set()
 
     direct_programs: Dict[str, ExportedProgram] = {}
-    for name, program in aten_programs.items():
-        partitioners_for_program = partitioner.get(name, [])
-        if len(partitioners_for_program) != 1:
-            return None, set()
+    with profile_scope("exir.maybe_direct_lower", methods=len(aten_programs)):
+        for name, program in aten_programs.items():
+            partitioners_for_program = partitioner.get(name, [])
+            if len(partitioners_for_program) != 1:
+                return None, set()
 
-        direct_result = partitioners_for_program[0].direct_lower(program, config)
-        if direct_result is None:
-            return None, set()
-        assert isinstance(direct_result, DirectLoweringResult)
-        direct_program = direct_result.exported_program
-        if direct_result.post_lowering_passes:
-            direct_program = _transform(
-                direct_program,
-                *direct_result.post_lowering_passes,
-                override_verifiers=direct_result.override_verifiers,
-            )
-        direct_programs[name] = direct_program
+            with profile_scope(
+                "exir.direct_lower",
+                method=name,
+                partitioner=partitioners_for_program[0].__class__.__name__,
+            ):
+                direct_result = partitioners_for_program[0].direct_lower(program, config)
+            if direct_result is None:
+                return None, set()
+            assert isinstance(direct_result, DirectLoweringResult)
+            direct_program = direct_result.exported_program
+            if direct_result.post_lowering_passes:
+                with profile_scope("exir.direct_lower_post_passes", method=name):
+                    direct_program = _transform(
+                        direct_program,
+                        *direct_result.post_lowering_passes,
+                        override_verifiers=direct_result.override_verifiers,
+                    )
+            direct_programs[name] = direct_program
 
     edge_manager = EdgeProgramManager(
         direct_programs,
@@ -1543,84 +1618,88 @@ def to_edge_transform_and_lower(  # noqa: C901
         EdgeProgramManager
     """
     assert not isinstance(constant_methods, EdgeCompileConfig)
-    config = compile_config or EdgeCompileConfig()
-    if not isinstance(programs, dict):
-        aten_programs = {"forward": programs}
-    else:
-        aten_programs = programs
+    with profile_scope("exir.to_edge_transform_and_lower"):
+        config = compile_config or EdgeCompileConfig()
+        if not isinstance(programs, dict):
+            aten_programs = {"forward": programs}
+        else:
+            aten_programs = programs
 
-    if not isinstance(partitioner, dict) and partitioner is not None:
-        partitioner = {name: partitioner for name in aten_programs.keys()}
-    elif partitioner is None:
-        partitioner = {name: [] for name in aten_programs.keys()}
+        if not isinstance(partitioner, dict) and partitioner is not None:
+            partitioner = {name: partitioner for name in aten_programs.keys()}
+        elif partitioner is None:
+            partitioner = {name: [] for name in aten_programs.keys()}
 
-    edge_manager = None
-    direct_lowered_methods: Set[str] = set()
-    if transform_passes is None:
-        edge_manager, direct_lowered_methods = _maybe_direct_lower_with_partitioners(
-            partitioner,
-            aten_programs,
-            config,
-            constant_methods,
-            generate_etrecord,
-        )
-
-    if edge_manager is None:
-        edge_manager = _gen_edge_manager_for_partitioners(
-            partitioner, aten_programs, config, constant_methods, generate_etrecord
-        )
-
-    if transform_passes is not None:
-        edge_manager = edge_manager.transform(transform_passes)
-
-        if generate_etrecord:
-            edge_manager._etrecord.add_extra_export_modules(
-                {"edge_after_transform": copy.deepcopy(edge_manager)}
+        edge_manager = None
+        direct_lowered_methods: Set[str] = set()
+        if transform_passes is None:
+            edge_manager, direct_lowered_methods = _maybe_direct_lower_with_partitioners(
+                partitioner,
+                aten_programs,
+                config,
+                constant_methods,
+                generate_etrecord,
             )
 
-    max_num_partitioners = 0
-    for partitioner_list in partitioner.values():
-        max_num_partitioners = max(max_num_partitioners, len(partitioner_list))
-
-    for i in range(max_num_partitioners):
-        method_to_partitioner = {}
-        for name, partitioner_list in partitioner.items():
-            if name in direct_lowered_methods:
-                continue
-            if i < len(partitioner_list):
-                method_to_partitioner[name] = partitioner_list[i]
-        if method_to_partitioner:
-            edge_manager = edge_manager.to_backend(method_to_partitioner)
-
-    for name, program in edge_manager._edge_programs.items():
-        ops_set_to_not_decompose: Set[torch._ops.OpOverload] = set()
-        partitioners = partitioner.get(name, [])
-        for curr_partitioner in partitioners:
-            curr_op_set, check_op_support = curr_partitioner.ops_to_not_decompose(
-                program
+        if edge_manager is None:
+            edge_manager = _gen_edge_manager_for_partitioners(
+                partitioner, aten_programs, config, constant_methods, generate_etrecord
             )
 
-            if not _can_skip_using_EDGE_DO_NOT_DECOMP(curr_partitioner, program):
-                curr_op_set = _remove_invalid_ops_for_not_decompose(curr_op_set)
-            ops_set_to_not_decompose = ops_set_to_not_decompose.union(curr_op_set)
-            _sanity_check_graph_for_non_decomp_ops(
-                name,
-                program,
-                ops_set_to_not_decompose,
-                check_op_support,
-                partitioner_name=curr_partitioner.__class__.__name__,
-                generate_error=True,
-            )
+        if transform_passes is not None:
+            with profile_scope("exir.edge_manager_transform"):
+                edge_manager = edge_manager.transform(transform_passes)
 
-        preserve_ops = config.preserve_ops + list(ops_set_to_not_decompose)
-        if config._check_ir_validity:
-            EXIREdgeDialectVerifier(
-                edge_compile_config=config,
-                class_only=True,
-                preserve_ops=preserve_ops,
-            )()(program.graph_module)
+            if generate_etrecord:
+                edge_manager._etrecord.add_extra_export_modules(
+                    {"edge_after_transform": copy.deepcopy(edge_manager)}
+                )
 
-    return edge_manager
+        max_num_partitioners = 0
+        for partitioner_list in partitioner.values():
+            max_num_partitioners = max(max_num_partitioners, len(partitioner_list))
+
+        for i in range(max_num_partitioners):
+            method_to_partitioner = {}
+            for name, partitioner_list in partitioner.items():
+                if name in direct_lowered_methods:
+                    continue
+                if i < len(partitioner_list):
+                    method_to_partitioner[name] = partitioner_list[i]
+            if method_to_partitioner:
+                with profile_scope("exir.edge_manager_to_backend", round=i):
+                    edge_manager = edge_manager.to_backend(method_to_partitioner)
+
+        with profile_scope("exir.final_backend_sanity"):
+            for name, program in edge_manager._edge_programs.items():
+                ops_set_to_not_decompose: Set[torch._ops.OpOverload] = set()
+                partitioners = partitioner.get(name, [])
+                for curr_partitioner in partitioners:
+                    curr_op_set, check_op_support = curr_partitioner.ops_to_not_decompose(
+                        program
+                    )
+
+                    if not _can_skip_using_EDGE_DO_NOT_DECOMP(curr_partitioner, program):
+                        curr_op_set = _remove_invalid_ops_for_not_decompose(curr_op_set)
+                    ops_set_to_not_decompose = ops_set_to_not_decompose.union(curr_op_set)
+                    _sanity_check_graph_for_non_decomp_ops(
+                        name,
+                        program,
+                        ops_set_to_not_decompose,
+                        check_op_support,
+                        partitioner_name=curr_partitioner.__class__.__name__,
+                        generate_error=True,
+                    )
+
+                preserve_ops = config.preserve_ops + list(ops_set_to_not_decompose)
+                if config._check_ir_validity:
+                    EXIREdgeDialectVerifier(
+                        edge_compile_config=config,
+                        class_only=True,
+                        preserve_ops=preserve_ops,
+                    )()(program.graph_module)
+
+        return edge_manager
 
 
 @et_logger("to_edge")
@@ -1880,28 +1959,36 @@ class EdgeProgramManager:
             EdgeProgramManager: A copy of the calling EdgeProgramManager with the
             specified subgraphs lowered.
         """
-        new_edge_programs: Dict[str, ExportedProgram] = {}
-        method_to_partitioner: Dict[str, Partitioner] = {}
-        if not isinstance(partitioner, dict):
-            method_to_partitioner = {name: partitioner for name in self._edge_programs}
-        else:
-            method_to_partitioner = partitioner
+        with profile_scope("exir.EdgeProgramManager.to_backend"):
+            new_edge_programs: Dict[str, ExportedProgram] = {}
+            method_to_partitioner: Dict[str, Partitioner] = {}
+            if not isinstance(partitioner, dict):
+                method_to_partitioner = {
+                    name: partitioner for name in self._edge_programs
+                }
+            else:
+                method_to_partitioner = partitioner
 
-        method_to_programs_and_partitioners = MethodProgramsPartitionerSpec(
-            self._edge_programs,
-            method_to_partitioner,
-        )
+            method_to_programs_and_partitioners = MethodProgramsPartitionerSpec(
+                self._edge_programs,
+                method_to_partitioner,
+            )
 
-        new_edge_programs = to_backend(method_to_programs_and_partitioners)
-        config = EdgeCompileConfig(_check_ir_validity=False)
-        epm = EdgeProgramManager(
-            new_edge_programs,
-            copy.deepcopy(self._config_methods),
-            config,
-        )
+            with profile_scope(
+                "exir.backend_api.to_backend_dispatch",
+                methods=len(method_to_programs_and_partitioners.method_to_edge_program),
+            ):
+                new_edge_programs = to_backend(method_to_programs_and_partitioners)
+            config = EdgeCompileConfig(_check_ir_validity=False)
+            with profile_scope("exir.EdgeProgramManager.rewrap_after_backend"):
+                epm = EdgeProgramManager(
+                    new_edge_programs,
+                    copy.deepcopy(self._config_methods),
+                    config,
+                )
 
-        epm._etrecord = self._etrecord
-        return epm
+            epm._etrecord = self._etrecord
+            return epm
 
     @et_logger("to_executorch")
     def to_executorch(  # noqa (FLAKE8) C901
@@ -1919,105 +2006,137 @@ class EdgeProgramManager:
             ExecutorchProgramManager: A manager representing the state of the EdgeProgramManager
             after it has been transformed to the ExecuTorch backend.
         """
-        config = config if config else ExecutorchBackendConfig()
-        execution_programs: Dict[str, ExportedProgram] = {}
-        for name, program in self._edge_programs.items():
-            if config.do_quant_fusion_and_const_prop:
-                if program.graph_signature.backward_signature is not None:
-                    raise Exception(
-                        "Cannot run do_quant_fusion_and_const_prop on a graph with a backward signature intended for on-device training."
-                        " Please set do_quant_fusion_and_const_prop to False in the ExecutorchBackendConfig."
-                    )
-                program = quant_fusion_and_const_prop_pass(program)
-            if config.run_reinplace_pass:
-                program = reinplace_pass(program)
-            program = weights_to_outputs_pass(program)
-            program = unsafe_remove_auto_functionalized_pass(program)
-            gm, new_signature = insert_write_back_for_buffers_pass(program)
-            new_gm = program.graph_module
-            for p in edge_to_executorch_passes(config, name):
-                new_gm_res = p(new_gm)
-                assert new_gm_res is not None
-                new_gm = new_gm_res.graph_module
-                if isinstance(p, SpecPropPass):
-                    # Note that this is a hacky way to get around the fact that
-                    # placeholder nodes corresponding to the parameters of the graph module
-                    # shall not participate in memory planning. It increases runtime memory
-                    # footprint.
-                    # Proper way would be to have ExportPass work with ExportedProgram
-                    # instead of GraphModule. This is because ExportPass should work
-                    # on top of the export artifact of torch.export whichi s ExportedProgram.
-                    # Working with GraphModule does not provide all the information contained
-                    # in the ExportedProgram
-                    # TODO(who?)
-                    p.update_placeholder_tensor_specs(program, new_gm)
+        with profile_scope("exir.EdgeProgramManager.to_executorch"):
+            config = config if config else ExecutorchBackendConfig()
+            execution_programs: Dict[str, ExportedProgram] = {}
+            for name, program in self._edge_programs.items():
+                if config.do_quant_fusion_and_const_prop:
+                    if program.graph_signature.backward_signature is not None:
+                        raise Exception(
+                            "Cannot run do_quant_fusion_and_const_prop on a graph with a backward signature intended for on-device training."
+                            " Please set do_quant_fusion_and_const_prop to False in the ExecutorchBackendConfig."
+                        )
+                    with profile_scope("exir.to_executorch.quant_fusion", method=name):
+                        program = quant_fusion_and_const_prop_pass(program)
+                if config.run_reinplace_pass:
+                    with profile_scope("exir.to_executorch.reinplace", method=name):
+                        program = reinplace_pass(program)
+                with profile_scope("exir.to_executorch.weights_to_outputs", method=name):
+                    program = weights_to_outputs_pass(program)
+                with profile_scope(
+                    "exir.to_executorch.remove_auto_functionalized", method=name
+                ):
+                    program = unsafe_remove_auto_functionalized_pass(program)
+                with profile_scope("exir.to_executorch.insert_write_back", method=name):
+                    gm, new_signature = insert_write_back_for_buffers_pass(program)
+                new_gm = program.graph_module
+                for p in edge_to_executorch_passes(config, name):
+                    pass_name = p.__class__.__name__
+                    with profile_scope(
+                        "exir.to_executorch.edge_pass",
+                        method=name,
+                        pass_name=pass_name,
+                    ):
+                        new_gm_res = p(new_gm)
+                    assert new_gm_res is not None
+                    new_gm = new_gm_res.graph_module
+                    if isinstance(p, SpecPropPass):
+                        # Note that this is a hacky way to get around the fact that
+                        # placeholder nodes corresponding to the parameters of the graph module
+                        # shall not participate in memory planning. It increases runtime memory
+                        # footprint.
+                        # Proper way would be to have ExportPass work with ExportedProgram
+                        # instead of GraphModule. This is because ExportPass should work
+                        # on top of the export artifact of torch.export whichi s ExportedProgram.
+                        # Working with GraphModule does not provide all the information contained
+                        # in the ExportedProgram
+                        # TODO(who?)
+                        p.update_placeholder_tensor_specs(program, new_gm)
 
             # Tag constant weights.
-            if (
-                isinstance(config.external_constants, bool)
-                and config.external_constants
-            ):
-                new_gm_res = external_constants_pass(new_gm)
-                new_gm = new_gm_res.graph_module
-            elif callable(config.external_constants):
-                new_gm_res = external_constants_pass(new_gm, config.external_constants)
+                if (
+                    isinstance(config.external_constants, bool)
+                    and config.external_constants
+                ):
+                    with profile_scope(
+                        "exir.to_executorch.external_constants", method=name
+                    ):
+                        new_gm_res = external_constants_pass(new_gm)
+                    new_gm = new_gm_res.graph_module
+                elif callable(config.external_constants):
+                    with profile_scope(
+                        "exir.to_executorch.external_constants", method=name
+                    ):
+                        new_gm_res = external_constants_pass(
+                            new_gm, config.external_constants
+                        )
+                    new_gm = new_gm_res.graph_module
+
+                # Tag mutable weights.
+                if config.external_mutable_weights:
+                    with profile_scope(
+                        "exir.to_executorch.external_mutable_weights", method=name
+                    ):
+                        new_gm_res = external_mutable_weights_pass(new_gm, program)
+                    new_gm = new_gm_res.graph_module
+
+                if isinstance(config.memory_planning_pass, dict):
+                    memory_planning_pass = config.memory_planning_pass.get(
+                        name, ExecutorchBackendConfig().memory_planning_pass
+                    )
+                else:
+                    memory_planning_pass = config.memory_planning_pass
+                # Propagate enable_non_cpu_memory_planning from the top-level config
+                # to the pass instance so that device-aware partitioning is applied.
+                if hasattr(memory_planning_pass, "enable_non_cpu_memory_planning"):
+                    memory_planning_pass.enable_non_cpu_memory_planning = (
+                        config.enable_non_cpu_memory_planning
+                    )
+                # TODO(jakeszwe): Follow up with compiler on if the deepcopy is necessary and if so how to make it work
+                with profile_scope("exir.to_executorch.memory_planning", method=name):
+                    if hasattr(memory_planning_pass, "run"):
+                        new_gm_res = memory_planning_pass.run(new_gm, new_signature)
+                    else:
+                        new_gm_res = memory_planning_pass(new_gm)
+
+                # WARNING: DO NOT ADD ANY MORE PASSES AFTER MEMORY PLANNING PASS.
+                # THERE ARE A LOT OF ASSUMPTIONS IN THE STACK THAT MEMORY PLANNING IS THE LAST PASS BEFORE THE EMITTER.
+                assert new_gm_res is not None
                 new_gm = new_gm_res.graph_module
 
-            # Tag mutable weights.
-            if config.external_mutable_weights:
-                new_gm_res = external_mutable_weights_pass(new_gm, program)
-                new_gm = new_gm_res.graph_module
-
+                with profile_scope("exir.to_executorch.copy_module", method=name):
+                    _copy_module(program.graph_module, new_gm)
+                execution_programs[name] = program
+            # After running memory planning on all entry points we can run the cross entry point memory planning
             if isinstance(config.memory_planning_pass, dict):
-                memory_planning_pass = config.memory_planning_pass.get(
-                    name, ExecutorchBackendConfig().memory_planning_pass
-                )
+                for memory_planning_pass in config.memory_planning_pass.values():
+                    if hasattr(memory_planning_pass, "run_multimethod"):
+                        with profile_scope(
+                            "exir.to_executorch.memory_planning_multimethod"
+                        ):
+                            memory_planning_pass.run_multimethod()
             else:
                 memory_planning_pass = config.memory_planning_pass
-            # Propagate enable_non_cpu_memory_planning from the top-level config
-            # to the pass instance so that device-aware partitioning is applied.
-            if hasattr(memory_planning_pass, "enable_non_cpu_memory_planning"):
-                memory_planning_pass.enable_non_cpu_memory_planning = (
-                    config.enable_non_cpu_memory_planning
-                )
-            # TODO(jakeszwe): Follow up with compiler on if the deepcopy is necessary and if so how to make it work
-            if hasattr(memory_planning_pass, "run"):
-                new_gm_res = memory_planning_pass.run(new_gm, new_signature)
-            else:
-                new_gm_res = memory_planning_pass(new_gm)
-
-            # WARNING: DO NOT ADD ANY MORE PASSES AFTER MEMORY PLANNING PASS.
-            # THERE ARE A LOT OF ASSUMPTIONS IN THE STACK THAT MEMORY PLANNING IS THE LAST PASS BEFORE THE EMITTER.
-            assert new_gm_res is not None
-            new_gm = new_gm_res.graph_module
-
-            _copy_module(program.graph_module, new_gm)
-            execution_programs[name] = program
-        # After running memory planning on all entry points we can run the cross entry point memory planning
-        if isinstance(config.memory_planning_pass, dict):
-            for memory_planning_pass in config.memory_planning_pass.values():
                 if hasattr(memory_planning_pass, "run_multimethod"):
-                    memory_planning_pass.run_multimethod()
-        else:
-            memory_planning_pass = config.memory_planning_pass
-            if hasattr(memory_planning_pass, "run_multimethod"):
-                memory_planning_pass.run_multimethod()
+                    with profile_scope("exir.to_executorch.memory_planning_multimethod"):
+                        memory_planning_pass.run_multimethod()
 
-        et_pm = ExecutorchProgramManager(
-            execution_programs,
-            self._config_methods,
-            config,
-            self._named_data_store.get_named_data_store_output(),
-        )
+            with profile_scope("exir.ExecutorchProgramManager.construct"):
+                et_pm = ExecutorchProgramManager(
+                    execution_programs,
+                    self._config_methods,
+                    config,
+                    self._named_data_store.get_named_data_store_output(),
+                )
 
-        if self._etrecord is not None:
-            # Create a clean copy of the ETRecord for the executorch manager
-            # This preserves edge-stage data while allowing executorch data to be added
-            et_etrecord = self._etrecord.copy()
-            et_etrecord.add_executorch_program(et_pm)
-            et_pm._etrecord = et_etrecord
+            if self._etrecord is not None:
+                # Create a clean copy of the ETRecord for the executorch manager
+                # This preserves edge-stage data while allowing executorch data to be added
+                et_etrecord = self._etrecord.copy()
+                et_etrecord.add_executorch_program(et_pm)
+                et_pm._etrecord = et_etrecord
 
-        return et_pm
+            return et_pm
 
 
 class ExecutorchProgramManager:
@@ -2066,12 +2185,16 @@ class ExecutorchProgramManager:
         backend_config = backend_config or ExecutorchBackendConfig()
 
         # Emit methods
-        self._emitter_output: EmitterOutput = emit_program(
-            self._execution_programs,
-            backend_config.emit_stacktrace,
-            self._config_methods,
-            backend_config.emit_mutable_buffer_names,
-        )
+        with profile_scope(
+            "exir.ExecutorchProgramManager.emit_program",
+            methods=len(self._execution_programs),
+        ):
+            self._emitter_output: EmitterOutput = emit_program(
+                self._execution_programs,
+                backend_config.emit_stacktrace,
+                self._config_methods,
+                backend_config.emit_mutable_buffer_names,
+            )
 
         # Serialize emitter output, ready to be written to a file.
         from executorch.extension.flat_tensor.serialize.serialize import (
@@ -2082,12 +2205,13 @@ class ExecutorchProgramManager:
         self._data_serializer = FlatTensorSerializer(
             FlatTensorConfig(segment_alignment=backend_config.segment_alignment)
         )
-        self._pte_data, self._tensor_data = serialize_for_executorch(
-            self._emitter_output,
-            backend_config,
-            self._data_serializer,
-            self._named_data,
-        )
+        with profile_scope("exir.ExecutorchProgramManager.serialize_for_executorch"):
+            self._pte_data, self._tensor_data = serialize_for_executorch(
+                self._emitter_output,
+                backend_config,
+                self._data_serializer,
+                self._named_data,
+            )
         self._buffer: Optional[bytes] = None
         self._etrecord = None
 

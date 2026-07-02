@@ -323,6 +323,25 @@ class BasePipeline(Generic[T]):
         )
         return self
 
+    def count_tosa_ops_at_most(self, max_ops: Dict[str, int]):
+        """Assert upper bounds on TOSA op counts in the graph."""
+        if not self.has_stage("to_edge_transform_and_lower"):
+            raise RuntimeError(
+                "count_tosa_ops_at_most requires to_edge_transform_and_lower in the pipeline."
+            )
+
+        def _count_tosa_ops_at_most():
+            stage = self.tester.stages[StageType.TO_EDGE_TRANSFORM_AND_LOWER]
+            graph_module = stage.graph_module
+            arm_tester_module.count_tosa_ops_at_most(graph_module, max_ops)
+
+        self.add_stage_after(
+            "to_edge_transform_and_lower",
+            _count_tosa_ops_at_most,
+            suffix="tosa_ops_at_most",
+        )
+        return self
+
     def count_program_io_kinds(
         self,
         expected_inputs: dict[InputKind, int] | None,
