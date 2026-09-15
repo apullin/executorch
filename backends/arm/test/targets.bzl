@@ -58,6 +58,7 @@ def define_arm_tests():
     # Quantization
     test_files += [
         "quantizer/test_generic_annotater.py",
+        "quantizer/test_quantizable_rnn_gru.py",
         "quantizer/test_uint8_io_quantization.py",
         "quantizer/test_vgf_snorm_quantization.py",
     ]
@@ -144,6 +145,7 @@ def define_arm_tests():
                 "//executorch/backends/arm/tosa:compile_spec",
                 "//executorch/backends/arm/tosa:partitioner",
                 "//executorch/backends/arm:vgf",
+                "//executorch/backends/arm/quantizable:quantizable",
                 "//executorch/backends/test:graph_builder",
                 "//executorch/backends/test:program_builder",
                 "//executorch/extension/export_util:export_util",
