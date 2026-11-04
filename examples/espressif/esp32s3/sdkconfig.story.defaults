@@ -1,0 +1,13 @@
+# Copyright (c) 2026 Andrew Pullin
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+# Story firmware memory placement (run_story_hardware.py applies this to every story build).
+# Internal SRAM is the model's: the 147 KB KV cache, the delegate's scratch and the method
+# arena want it, and so do the 32 KB instruction cache and the e-paper display. This lets
+# EXT_RAM_BSS_ATTR statics and the components' linker fragments put cold .bss in PSRAM:
+# the story's text buffers, ExecuTorch's kernel registry and the delegate's weight-cache
+# table (about 64 KB together). The PSRAM heap shrinks by as much; the 6 MB weight stage
+# leaves about 1 MB of it free.
+CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y

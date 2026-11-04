@@ -1,0 +1,17 @@
+# Copyright (c) 2026 Andrew Pullin
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+# espressif::lut16 (quant_lut16.cpp) and its LX7 loops (quant_lut16_s3.S) are
+# linked like quant_lut.cpp: mapped on their own, after the generic flash
+# catch-alls, so they move none of the story firmware's functions or tables
+# (its timing depends on their placement).
+[mapping:quant_lut16]
+archive: libespressif_backend.a
+entries:
+    quant_lut16 (default);
+        text->flash_text SURROUND(quant_lut16_text),
+        rodata->flash_rodata SURROUND(quant_lut16_rodata)
+    quant_lut16_s3 (default);
+        text->flash_text SURROUND(quant_lut16_s3_text)

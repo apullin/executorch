@@ -1,0 +1,15 @@
+menu "ExecuTorch runner"
+
+    config ET_BENCH_MEM
+        bool "Memory bandwidth and weight-tier rate rows at boot (hardware only)"
+        default n
+        help
+            Builds main.cpp's bench_memory and the weight tiers' kernel-rate
+            rows (bench_tiers.cpp) into the firmware and runs them at boot,
+            before the model. The same as -DET_BENCH_MEM=1, for a build whose
+            command line is fixed: run_story_hardware.py --sdkconfig-extra
+            sdkconfig.bench.defaults builds the story with them, in a build
+            directory of its own. Emulated flash is RAM, so the rows mean
+            nothing under QEMU.
+
+endmenu

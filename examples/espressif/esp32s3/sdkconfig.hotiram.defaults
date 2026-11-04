@@ -1,0 +1,16 @@
+# Copyright (c) 2026 Andrew Pullin
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+# The story with the decode's per-token code in internal RAM (the backend's
+# CONFIG_ESP32_BACKEND_HOT_IRAM: ESP32_HOT_CODE functions, the PIE kernels and
+# ExecuTorch's instruction loop), for a board A/B against the plain build:
+#   run_story_hardware.py --reuse-artifact --sdkconfig-extra sdkconfig.hotiram.defaults ...
+# builds it in build_story_hw_hotiram. The internal heap shrinks by what
+# .iram0.text grows; compare the boot's "[mem]" line and the KV cache's
+# "shared mem-id-2 ... (internal)" before comparing ms/token. The 27 KB come
+# from what the story's floor lets it place after load: decode's own
+# activations (33.8 KB, on by default) do not fit beside it, so the
+# placement alternative is this file with --no-decode-act-internal.
+CONFIG_ESP32_BACKEND_HOT_IRAM=y

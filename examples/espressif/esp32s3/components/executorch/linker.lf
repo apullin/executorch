@@ -1,0 +1,19 @@
+# Copyright (c) 2026 Andrew Pullin
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+# The kernel registry (24 KB of .bss: room for 2,000 kernels) is read while a
+# method loads, never per token. Builds with
+# CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY (sdkconfig.story.defaults) put it
+# in PSRAM and leave the internal SRAM to the model and the caches.
+[scheme:et_extram_bss]
+entries:
+    bss -> extern_ram
+    common -> extern_ram
+
+[mapping:executorch_extram]
+archive: libexecutorch.a
+entries:
+    if ESP_ALLOW_BSS_SEG_EXTERNAL_MEMORY = y:
+        operator_registry (et_extram_bss)

@@ -1,0 +1,21 @@
+# Build output and the component manager's downloads.
+build*/
+sdkconfig
+sdkconfig.old
+managed_components/
+dependencies.lock
+# scripts/gen_kernels.py: the schema headers, the kernel registration and its
+# source list, and the operator list it reads.
+components/executorch/generated*/
+components/executorch/generated_kernel_srcs*.cmake
+required_ops.txt
+# The exporters: programs, weights, fixture images and generated inputs.
+main/*.pte
+main/*.ptd
+main/*.bin
+main/*_inputs.h
+main/*_ref.json
+main/ple_required_ops.txt
+main/story_vocab.h
+main/story_bpe_tables.h
+main/story_artifact.json

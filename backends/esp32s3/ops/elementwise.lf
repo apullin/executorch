@@ -1,0 +1,15 @@
+# Copyright (c) 2026 Andrew Pullin
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+# The element-wise loops (elementwise.cpp) are linked like qdq_pool.cpp:
+# mapped on their own, after the generic flash catch-alls, so they move no
+# other function or table. The story firmware's programs reach none of them,
+# and this mapping then places no bytes.
+[mapping:elementwise]
+archive: libespressif_backend.a
+entries:
+    elementwise (default);
+        text->flash_text SURROUND(elementwise_text),
+        rodata->flash_rodata SURROUND(elementwise_rodata)

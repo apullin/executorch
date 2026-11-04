@@ -1,0 +1,18 @@
+# Copyright (c) 2026 Andrew Pullin
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+# The asymmetric-quantisation code (esp32_asym.cpp) is off the symmetric
+# models' path: init-time validation, and the affine loops only asymmetric
+# models run. Mapped on its own, its code and constants are placed after the
+# generic flash catch-alls instead of between libmain.a's other objects and
+# every library linked after them, so a change to it moves no hot function
+# or table: the I-cache layout of the story's measured decode does not depend
+# on it. The SURROUND symbols name the span in the map and the ELF.
+[mapping:esp32_asym]
+archive: libespressif_backend.a
+entries:
+    esp32_asym (default);
+        text->flash_text SURROUND(esp32_asym_text),
+        rodata->flash_rodata SURROUND(esp32_asym_rodata)

@@ -1,0 +1,20 @@
+# Copyright (c) 2026 Andrew Pullin
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+menu "ExecuTorch runtime (esp32 backend)"
+
+config ET_PORTABLE_O2
+    bool "Compile the ExecuTorch runtime and portable kernels at -O2 (default -Os)"
+    default n
+    help
+        -Os keeps the image small; -O2 inlines and unrolls the runtime and
+        the portable kernels a program registers, at the cost of code size.
+        The story firmware cannot take it: its app grows by 160,528 B, past
+        its partition, and its decode calls one portable kernel, twice a
+        token (index_select); the custom ops and the fast paths run the rest
+        (the backend's ESP32_BACKEND_OPS_O2). An A/B experiment switch for
+        programs whose portable operators run on every inference.
+
+endmenu

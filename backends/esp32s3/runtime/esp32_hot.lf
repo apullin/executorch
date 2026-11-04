@@ -1,0 +1,27 @@
+# Copyright (c) 2026 Andrew Pullin
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+# CONFIG_ESP32_BACKEND_HOT_IRAM (the backend component's Kconfig): the code a
+# decode step runs on every token, in internal RAM. The C++ functions carry
+# ESP32_HOT_CODE (esp32_hot.h); this places what has no mark to carry: the PIE
+# kernels, whose objects hold nothing else (their tables stay in flash), and
+# ExecuTorch's instruction loop, which a decode step enters once and which
+# then dispatches every operator and delegate call of the plan. Nothing here
+# applies with the option off.
+[mapping:esp32_hot_kernels]
+archive: libespressif_backend.a
+entries:
+    if ESP32_BACKEND_HOT_IRAM = y:
+        dot_i4_s3 (noflash_text)
+        dot_i8_s3 (noflash_text)
+        unpack_i4_s3 (noflash_text)
+        rmsnorm_s3 (noflash_text)
+# The loop's mangled names (ExecuTorch 1.6): an upstream rename must be mirrored here.
+[mapping:esp32_hot_executorch]
+archive: libexecutorch.a
+entries:
+    if ESP32_BACKEND_HOT_IRAM = y:
+        method:_ZN10executorch7runtime6Method7executeEv (noflash_text)
+        method:_ZN10executorch7runtime6Method19execute_instructionEv (noflash_text)

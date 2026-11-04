@@ -1,0 +1,15 @@
+# Copyright (c) 2026 Andrew Pullin
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+# ExecuTorch's stock quantised K/V cache kernels (kv_affine.cpp) are linked
+# like esp32_asym.cpp: mapped on their own, after the generic flash
+# catch-alls, so they move none of the story firmware's functions or tables
+# (its timing depends on their placement).
+[mapping:kv_affine]
+archive: libespressif_backend.a
+entries:
+    kv_affine (default);
+        text->flash_text SURROUND(kv_affine_text),
+        rodata->flash_rodata SURROUND(kv_affine_rodata)

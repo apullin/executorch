@@ -1,0 +1,15 @@
+# Copyright (c) 2026 Andrew Pullin
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+# The static int8 convolution path (esp32_conv.cpp) is linked like
+# esp32_asym.cpp: mapped on its own, after the generic flash catch-alls, so it
+# moves no hot function or table of the story's measured decode. The story's
+# integer weights never reach it (and its build leaves it out: ESP32_CONV_FAST).
+[mapping:esp32_conv]
+archive: libespressif_backend.a
+entries:
+    esp32_conv (default);
+        text->flash_text SURROUND(esp32_conv_text),
+        rodata->flash_rodata SURROUND(esp32_conv_rodata)

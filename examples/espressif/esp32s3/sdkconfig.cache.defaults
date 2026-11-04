@@ -1,0 +1,21 @@
+# Copyright (c) 2026 Andrew Pullin
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+# Story firmware caches (run_story_hardware.py applies this by default; --default-caches opts out).
+# The board A/B that chose them (story Glimmer decode, dual core, 6 MB PSRAM staging):
+#   IDF default, 16 KB ICache / 32 KB DCache, 32 B lines : 141 ms/token (timing build)
+#   64 KB DCache, 64 B lines                              : 119 ms/token (timing build)
+#   + 32 KB ICache (this file), display ON, plain build   : 106 -> 97 ms/token, golden MATCH
+# A decode token streams ~5 MB of weights through the data cache, so its size and line
+# length matter; the bigger instruction cache keeps the decode loop's code resident.
+# The ICache's 16 KB of SRAM come out of the internal heap; the story's cold .bss and
+# LVGL's heap live in PSRAM (sdkconfig.story.defaults, 65 KB), so the 147 KB KV cache
+# stays internal either way (boot: 250 KB internal free with this file, display on).
+CONFIG_ESP32S3_DATA_CACHE_64KB=y
+CONFIG_ESP32S3_DATA_CACHE_8WAYS=y
+CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
+CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y
+CONFIG_ESP32S3_INSTRUCTION_CACHE_8WAYS=y
+CONFIG_ESP32S3_INSTRUCTION_CACHE_LINE_32B=y

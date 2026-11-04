@@ -1,0 +1,14 @@
+# Copyright (c) 2026 Andrew Pullin
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+# The lean PLE build (ET_PLE_ONLY): one model's program and weights in their own
+# flash partitions, in the N16R8's real 16 MB layout (QEMU's esp32s3 machine
+# models fixed SPI flash chips and rejects a 32 MB image). The zoo blobs are
+# compiled out; everything else is the identical runtime.
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_ple.csv"
+# PSRAM stays OFF: the QEMU ssi_psram device is hardwired 32 MB
+# regardless of CONFIG_SPIRAM_TYPE (that knob only picks octal), and mapping it
+# consumes the whole MMU vaddr window -- partition mmap then fails before the model
+# ever loads. In QEMU, internal RAM has to carry the whole plan.

@@ -1,0 +1,16 @@
+# Copyright (c) 2026 Andrew Pullin
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+# Real ESP32-S3 N16R8 overlay. Layer after sdkconfig.defaults; keep the QEMU
+# base unchanged because its synthetic PSRAM exhausts the MMU window needed by
+# large partition mmaps.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y

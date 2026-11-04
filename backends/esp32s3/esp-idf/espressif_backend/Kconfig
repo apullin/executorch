@@ -1,0 +1,58 @@
+# Copyright (c) 2026 Andrew Pullin
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+# Build switches for speed, each at the value the board chose. On the
+# PaperColor (story decode), the operator library at
+# -O2 saved 1.74% a token, and the split at 64 columns gained nothing over 32;
+# the per-token code in internal RAM saved 1.34% but needs 27 KB of internal
+# SRAM, which the story spends on decode's activations instead (1.81%). An
+# example project changes one in a defaults file of its own
+# (examples/espressif/esp32s3: the sdkconfig.<switch>.defaults files and
+# run_story_hardware.py --sdkconfig-extra), and builds it in a directory of its
+# own.
+menu "Espressif backend (ESP32-S3)"
+
+config ESP32_BACKEND_OPS_O2
+    bool "Compile the operator library at -O2 instead of -Os"
+    default y
+    help
+        espressif_ops.cpp holds the custom ops and the portable fast paths
+        a transformer decode runs between its delegate calls: the attention
+        tail, the RMSNorms, RoPE, the KV-row writes, the scalar multiplies
+        and the mask compares. -O2 inlines and unrolls them at the cost of
+        code size: 6,448 B more flash in the story firmware, 14,128 B in the
+        parity firmware, whose values do not change. The story decodes 1.74%
+        faster (89.54 -> 87.99 ms/token on the PaperColor). The delegate's
+        own -O2 is ESP32_BACKEND_O2, a CMake option.
+
+config ESP32_BACKEND_SPLIT_MIN_COLS
+    int "Narrowest projection the min-latency mode splits across both cores"
+    default 32
+    range 1 65536
+    help
+        Under the min_latency option a projection's output columns go half
+        to each core, unless it has fewer columns than this: below it the
+        fork/join handshake is expected to cost more than the columns it
+        moves. The story Glimmer's K and V projections have 32 columns, so
+        64 runs them on one core (16 of the 82 splits a token) and every
+        wider projection still splits. A split moves whole columns, so the
+        outputs are the same either way.
+
+config ESP32_BACKEND_HOT_IRAM
+    bool "Run the decode's per-token code from internal RAM"
+    default n
+    help
+        Places the code a transformer decode runs on every token in internal
+        RAM instead of flash: the functions marked ESP32_HOT_CODE (the
+        delegate's dispatch and row loops, the activation quantiser, the
+        split worker, the custom ops and fast paths between delegates), the
+        PIE kernels and ExecuTorch's instruction loop (esp32_hot.lf). From
+        flash that code competes for the 32 KB instruction cache, where each
+        function lands depending on the size of unrelated code. The internal
+        heap shrinks by what .iram0.text grows: 26,952 B in the story
+        firmware, from the same RAM the KV cache, the delegate's internal
+        scratch and the display allocate.
+
+endmenu

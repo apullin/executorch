@@ -1,0 +1,56 @@
+# Name,    Type, SubType,  Offset,    Size,     Flags
+nvs,       data, nvs,      0x9000,    0x5000,
+phy_init,  data, phy,      0xf000,    0x1000,
+# 4.5 MB app: the coverage zoo and generated selective kernels leave little room for
+# redundant program manifests. Cached i8 Glimmer therefore uses one multimethod PTE;
+# every loader finds external data by SUBTYPE, so offsets remain free to move: when
+# the app grows, every data partition below moves up by the same amount.
+factory,   app,  factory,  0x10000,   0x480000,
+# Weight partitions, all read via esp_partition_mmap through EspPartitionDataLoader.
+# Each program gets its own named-data map: generic constants and opaque delegate
+# weights are merged into that PTD, so exporters cannot overwrite a shared filename.
+weights,   data, 0x40,     0x490000,  0x100000,
+dweights,  data, 0x41,     0x590000,  0x100000,
+glimmerw,  data, 0x42,     0x690000,  0x300000,
+dcweights4,data, 0x46,     0x990000,  0x200000,
+# The table op's parity rows: one multi-method program
+# (backends/esp32s3/test/fixtures/quant_lut.py),
+# kept out of the app partition, which has no room for its 30 KB of tables.
+luts,      data, 0x48,     0xC90000,  0x20000,
+# The weight-affine fixtures (fixtures/asym.py): the packed programs, then
+# the tied head's named data.
+asymprog,  data, 0x49,     0xCB0000,  0x40000,
+asymw,     data, 0x4A,     0xCF0000,  0x10000,
+# The dynamic-activation fixtures (fixtures/asym_act.py): the packed
+# programs, then the tied head's named data.
+asymact,   data, 0x4B,     0xD00000,  0x40000,
+asymactw,  data, 0x4C,     0xD40000,  0x10000,
+# The static int8 graphs (fixtures/asym_static.py): the packed programs.
+asymstat,  data, 0x4D,     0xD50000,  0x40000,
+# The CNN and RNN rows (fixtures/cnn.py): MLPerf Tiny's DS-CNN and ResNet-8 and
+# the census's LSTM and GRU, Arm a8w8, the packed programs. At 0xD90000, the
+# gap between asymstat and stockllm; their named data in cnnrnnw, at 0xE10000,
+# the gap between stockllm and asyma16.
+cnnrnn,    data, 0x60,     0xD90000,  0x40000,
+# ExecuTorch's own LLM recipes (fixtures/stock_llm.py): the stock quantised K/V
+# cache and embeddings, each row a packed program run as a sequence.
+stockllm,  data, 0x50,     0xDD0000,  0x40000,
+# The CNN and RNN rows' named data (fixtures/cnn.py), one file for all four.
+cnnrnnw,   data, 0x61,     0xE10000,  0x40000,
+# The int16 activations (fixtures/asym_a16.py, Arm a16w8): the packed
+# programs.
+asyma16,   data, 0x53,     0xE50000,  0x40000,
+# The QAT round trips (fixtures/asym_qat.py): the packed programs. 0xE90000-0xED0000 is free.
+asymqat,   data, 0x56,     0xED0000,  0x40000,
+# The fused quantised norms (fixtures/qnorm.py): the packed programs, in
+# 0xF10000-0xF50000, the space between asymqat and asymops.
+asymnorm,  data, 0x5F,     0xF10000,  0x40000,
+# The ops between delegates (fixtures/asym_static.py's second image: its rows
+# held to one code, its tables between delegates, its speed-table proof).
+asymops,   data, 0x5C,     0xF50000,  0x30000,
+# The int16 table op's parity rows (fixtures/lut16.py): one program per a16w8
+# activation site. At 0xF80000, flush after asymops.
+asymlut16, data, 0x5E,     0xF80000,  0x30000,
+# Stage B (fixtures/asym_stage_b.py): the packed Stage A and Stage B
+# programs of each row. The flash ends at 0x1000000; 0xFB0000-0xFD0000 is free.
+asymstgb,  data, 0x5D,     0xFD0000,  0x30000,

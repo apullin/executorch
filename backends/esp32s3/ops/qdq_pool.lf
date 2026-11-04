@@ -1,0 +1,16 @@
+# Copyright (c) 2026 Andrew Pullin
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+# The quantize, dequantize and average-pool overrides (qdq_pool.cpp) are linked
+# like esp32_conv.cpp: mapped on their own, after the generic flash catch-alls,
+# so they move no other function or table. A program without those operators
+# (the story) compiles nothing in that file, and this mapping then places no
+# bytes.
+[mapping:qdq_pool]
+archive: libespressif_backend.a
+entries:
+    qdq_pool (default);
+        text->flash_text SURROUND(qdq_pool_text),
+        rodata->flash_rodata SURROUND(qdq_pool_rodata)

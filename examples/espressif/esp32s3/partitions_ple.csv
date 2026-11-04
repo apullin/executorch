@@ -1,0 +1,15 @@
+# The lean PLE build's table (sdkconfig.ple): 16 MB, exactly the real part's
+# size. The app is the lean build (ET_PLE_ONLY: no zoo blobs); the model's
+# program and pass-through weights get the rest, both mmapped. Ends at
+# 0x1000000 exactly.
+# Name,     Type, SubType,  Offset,    Size,     Flags
+nvs,        data, nvs,      0x9000,    0x5000,
+phy_init,   data, phy,      0xf000,    0x1000,
+factory,    app,  factory,  0x10000,   0x160000,
+# DEFAULT split of the model region (scripts/flash_layout.py is the source of
+# truth): 36 4-KiB pages of program, the rest weights. A model that does not
+# fit (the story Glimmer's 170 KB program, the flash-scale speed check's
+# 15.14 MB weights) gets a table sized to it in its own build directory:
+# flash_layout.layout_for() / use_layout().
+pleprog,    data, 0x43,     0x170000,  0x24000,
+pleweights, data, 0x44,     0x194000,  0xe6c000,

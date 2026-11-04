@@ -1,0 +1,14 @@
+# Copyright (c) 2026 Andrew Pullin
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+# The story with the min-latency split's narrowest projection at 64 columns
+# instead of 32 (CONFIG_ESP32_BACKEND_SPLIT_MIN_COLS): the K and V projections
+# (32 columns each, 16 a token) then run on one core, every wider one still
+# splits. A split moves whole columns, so the values are the same. For a board
+# A/B against the plain build (--dual-core on both sides):
+#   run_story_hardware.py --reuse-artifact --dual-core --sdkconfig-extra sdkconfig.split64.defaults ...
+# builds it in build_story_hw_split64. A story experiment only: the parity
+# firmware's grouped_i4_split row (40 columns) would not split at 64.
+CONFIG_ESP32_BACKEND_SPLIT_MIN_COLS=64

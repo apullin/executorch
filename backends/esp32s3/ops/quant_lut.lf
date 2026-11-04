@@ -1,0 +1,15 @@
+# Copyright (c) 2026 Andrew Pullin
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+# espressif::quant_lut (quant_lut.cpp) is linked like esp32_asym.cpp: mapped
+# on its own, after the generic flash catch-alls, so it moves none of the
+# story firmware's functions or tables (its timing depends on their placement).
+# It is not cold -- a static CNN's activations run through it.
+[mapping:quant_lut]
+archive: libespressif_backend.a
+entries:
+    quant_lut (default);
+        text->flash_text SURROUND(quant_lut_text),
+        rodata->flash_rodata SURROUND(quant_lut_rodata)
