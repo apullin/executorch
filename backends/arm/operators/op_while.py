@@ -52,13 +52,14 @@ class WhileLoopVisitor(NodeVisitor):
             )
 
         attr = ts.TosaSerializerAttribute()
-        cond_graph, body_graph = (
+        cond_region, body_region = (
             cast(Node, arg).meta.get(
                 TOSA_CONTROL_FLOW_REGION_NAME_META, str(cast(Node, arg).target)
             )
             for arg in node.args[:2]
         )
-        attr.WhileLoopAttribute(cond_graph, body_graph)
+        attr.WhileLoopAttribute(cond_region, body_region)
+        body_graph = str(cast(Node, node.args[1]).target)
 
         input_names: list[str] = []
         for loop_input in carried_inputs:

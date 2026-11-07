@@ -107,6 +107,29 @@ class CondNestedOneArgOneOutput(torch.nn.Module):
         return torch.cond(predicate, outer_true, outer_false, [x])
 
 
+class CondNestedWhileUnusedOutput(torch.nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        def loop_cond(value: torch.Tensor, limit: torch.Tensor) -> torch.Tensor:
+            return torch.lt(value.sum(), limit).squeeze()
+
+        def loop_body(
+            value: torch.Tensor, limit: torch.Tensor
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            return torch.add(value, value), limit.clone()
+
+        def true_branch(arg: torch.Tensor) -> torch.Tensor:
+            result, _ = torch.ops.higher_order.while_loop(
+                loop_cond, loop_body, (arg, torch.full((1,), 10.0)), ()
+            )
+            return result
+
+        def false_branch(arg: torch.Tensor) -> torch.Tensor:
+            return arg - torch.full((1,), 1.0)
+
+        predicate = x.sum() > 0
+        return torch.cond(predicate, true_branch, false_branch, [x])
+
+
 class CondMultipleOneArgOneOutput(torch.nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         def first_true(arg: torch.Tensor) -> torch.Tensor:
@@ -230,6 +253,10 @@ test_cases: dict[str, Callable[[], tuple[torch.nn.Module, tuple]]] = {
     "two_args_one_output": _dual_input_case(CondTwoArgsOneOutput),
     "two_args_two_outputs": _dual_input_case(CondTwoArgsTwoOutputs),
     "nested_one_arg_one_output": _single_input_case(CondNestedOneArgOneOutput),
+    "nested_while_unused_output": lambda: (
+        CondNestedWhileUnusedOutput(),
+        (torch.ones(1, 1, 2, 2),),
+    ),
     "multiple_one_arg_one_output": _single_input_case(CondMultipleOneArgOneOutput),
 }
 
