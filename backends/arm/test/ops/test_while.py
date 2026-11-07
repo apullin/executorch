@@ -53,6 +53,31 @@ class WhileTwoInputsTwoOutputs(torch.nn.Module):
         return result  # type: ignore
 
 
+class WhileRotateUnusedFirstOutput(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+
+    def forward(self, value: torch.Tensor, other: torch.Tensor) -> torch.Tensor:
+        def cond_fn(value: torch.Tensor, other: torch.Tensor) -> torch.Tensor:
+            return torch.gt(value[:, :1].sum(), torch.full((1,), 0.5)).squeeze()
+
+        def body_fn(
+            value: torch.Tensor, other: torch.Tensor
+        ) -> Tuple[torch.Tensor, torch.Tensor]:
+            return (
+                torch.cat((value[:, 1:], value[:, :1]), dim=1),
+                torch.cat((other[:, 1:], other[:, :1]), dim=1),
+            )
+
+        _, result = torch.ops.higher_order.while_loop(
+            cond_fn,
+            body_fn,
+            (value, other),
+            (),
+        )
+        return result  # type: ignore
+
+
 class WhileOneInputOneBufferTwoOutputs(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
@@ -186,6 +211,13 @@ def _dual_input_case(
 
 test_cases: dict[str, Callable[[], Tuple[torch.nn.Module, Tuple]]] = {
     "two_in_two_out": _dual_input_case(WhileTwoInputsTwoOutputs),
+    "unused_first_output": lambda: (
+        WhileRotateUnusedFirstOutput(),
+        (
+            torch.tensor([[6.0, 3.0, 8.0, 0.25, 5.0, 1.0, 7.0, 2.0]]),
+            torch.linspace(0.1, 0.8, 8).reshape(1, 8),
+        ),
+    ),
     "one_in_one_buffer_two_out": _single_input_case(WhileOneInputOneBufferTwoOutputs),
     "decreasing_output": _single_input_case(DecreasingOutput),
     "additional_arg": _single_input_case(WhileAdditionalArg),

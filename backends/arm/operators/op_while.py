@@ -71,35 +71,36 @@ class WhileLoopVisitor(NodeVisitor):
             )
 
         num_inputs = len(input_names)
-        num_outputs = len(output.multiple_output_names)
-        if num_inputs > num_outputs:
-            # If we have more inputs than outputs, we can just add missing output tensors.
-            body_module = getattr(node.graph.owning_module, body_graph)
-            body_outputs = body_module.graph.output_node().args[0]
-            outputs_needing_tensors = body_outputs[num_outputs - num_inputs :]
-            for output_needing_tensor in outputs_needing_tensors:
-                tensor_name = output_needing_tensor.name + "_dummy"
-                shape = output_needing_tensor.meta["val"].shape
-                dtype = map_dtype(output_needing_tensor.meta["val"].dtype)
-
-                tosa_graph.currRegion.currBasicBlock.addTensor(
-                    tensor_name,
-                    normalize_symint(shape),
-                    dtype,
-                )
-                output.multiple_output_names.append(tensor_name)
-        elif num_inputs < num_outputs:
+        if num_inputs < len(output.multiple_output_names):
             # This is a strange case, if we reach it something bad has happened.
             raise ValueError(
                 f"TOSA specifies that the number of inputs, {input_names}, need to be the "
                 f"same as the number of outputs, {output.multiple_output_names}."
             )
 
+        # Wire each output by its getitem index. An output that is not used after
+        # the loop has no getitem, so it gets a dummy tensor.
+        suffix = node.meta.get(TOSA_TENSOR_NAME_META, "")
+        output_names = {
+            cast(int, user.args[1]): user.name + suffix for user in node.users
+        }
+        if len(output_names) < num_inputs:
+            body_module = getattr(node.graph.owning_module, body_graph)
+            body_outputs = body_module.graph.output_node().args[0]
+            for i, body_output in enumerate(body_outputs):
+                if i not in output_names:
+                    output_names[i] = f"{node.name}_dummy{i}{suffix}"
+                    tosa_graph.currRegion.currBasicBlock.addTensor(
+                        output_names[i],
+                        normalize_symint(body_output.meta["val"].shape),
+                        map_dtype(body_output.meta["val"].dtype),
+                    )
+
         self._serialize_operator(
             node,
             tosa_graph,
             ts.Op.WHILE_LOOP,
             input_names,
-            output.multiple_output_names,
+            [output_names[i] for i in range(num_inputs)],
             attr,
         )
