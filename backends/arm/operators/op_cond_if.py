@@ -18,10 +18,12 @@ from executorch.backends.arm.operators.operator_validation_utils import (
     validate_valid_dtype,
 )
 from executorch.backends.arm.tosa.mapping import (  # type: ignore
+    map_dtype,
     TOSA_CONTROL_FLOW_REGION_NAME_META,
     TOSA_TENSOR_NAME_META,
     TosaArg,
 )
+from executorch.backends.arm.tosa.utils import normalize_symint
 from torch.fx import Node
 
 
@@ -50,6 +52,22 @@ class CondVisitor(NodeVisitor):
         )
         attr.CondIfAttribute(if_graph, else_graph)
 
+        # Wire each output by its getitem index. An output that is not used after
+        # the cond has no getitem, so it gets a dummy tensor.
+        suffix = node.meta.get(TOSA_TENSOR_NAME_META, "")
+        output_names = {
+            cast(int, user.args[1]): user.name + suffix for user in node.users
+        }
+        output_vals = node.meta["val"]
+        for i, output_val in enumerate(output_vals):
+            if i not in output_names:
+                output_names[i] = f"{node.name}_dummy{i}{suffix}"
+                tosa_graph.currRegion.currBasicBlock.addTensor(
+                    output_names[i],
+                    normalize_symint(output_val.shape),
+                    map_dtype(output_val.dtype),
+                )
+
         self._serialize_operator(
             node,
             tosa_graph,
@@ -62,6 +80,6 @@ class CondVisitor(NodeVisitor):
                     for subgraph_input in inputs[-1].special
                 ),
             ],
-            output.multiple_output_names,
+            [output_names[i] for i in range(len(output_vals))],
             attr,
         )

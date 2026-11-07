@@ -88,6 +88,19 @@ class CondOneArgTwoOutputs(torch.nn.Module):
         return torch.cond(predicate, true_branch, false_branch, [x])
 
 
+class CondOneArgUnusedFirstOutput(torch.nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        def true_branch(arg: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+            return arg + torch.sin(arg), arg - torch.sin(arg)
+
+        def false_branch(arg: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+            return arg - torch.cos(arg), arg + torch.cos(arg)
+
+        predicate = x.flatten().sum() > 0
+        _, result = torch.cond(predicate, true_branch, false_branch, [x])
+        return result
+
+
 class CondNestedOneArgOneOutput(torch.nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         def inner_true(arg: torch.Tensor) -> torch.Tensor:
@@ -227,6 +240,7 @@ test_cases: dict[str, Callable[[], tuple[torch.nn.Module, tuple]]] = {
     "one_arg_const_one_output": _single_input_case(CondOneArgBufferOneOutput),
     "one_arg_and_scalar_one_output": _single_input_case(CondOneArgAndScalarOneOutput),
     "one_arg_two_outputs": _single_input_case(CondOneArgTwoOutputs),
+    "one_arg_unused_first_output": _single_input_case(CondOneArgUnusedFirstOutput),
     "two_args_one_output": _dual_input_case(CondTwoArgsOneOutput),
     "two_args_two_outputs": _dual_input_case(CondTwoArgsTwoOutputs),
     "nested_one_arg_one_output": _single_input_case(CondNestedOneArgOneOutput),
