@@ -604,23 +604,30 @@ class InsertControlFlowRescalesPass(ArmPass):
         del output_node.meta["input_qparams"]
         return modified
 
-    def _get_input_qparams_map(self, node: Node, idx: int):
-        input_qparams_meta = cast(
-            dict[int, QuantArgs], node.meta.get("input_qparams", None)
-        )
-        if input_qparams_meta:
-            input_qparams = cast(QuantArgs, input_qparams_meta.get(idx, None))
-            if not input_qparams:
-                raise ValueError(
-                    f"Expected entry with key {idx} in input_qparams meta, got {input_qparams_meta}"
-                )
-            num_inputs = len(cast(list, node.args[idx]))
+    def _get_input_qparams_map(
+        self, node: Node, idx: int, *submodules: GraphModule
+    ) -> Dict[int, QuantArgs]:
+        """Map each operand in ``node.args[idx]`` to its own qparams.
 
-            # Currently, infra only supports one set of qparams for a list of inputs
-            # Map all inputs to the same qparams.
-            input_qparams_map = {i: input_qparams for i in range(num_inputs)}
-            return input_qparams_map
-        return None
+        FoldAndAnnotateQParamsPass flattens the operand list, so the qparams of
+        operand ``i`` are stored with key ``idx + i``.
+
+        """
+        input_qparams = cast(Dict[int, QuantArgs], node.meta.get("input_qparams", {}))
+        submodule_inputs = [
+            self._get_input_nodes(submodule) for submodule in submodules
+        ]
+        input_qparams_map = {}
+        for i in range(len(cast(list, node.args[idx]))):
+            if idx + i in input_qparams:
+                input_qparams_map[i] = input_qparams[idx + i]
+            elif input_qparams and any(
+                "output_qparams" in inputs[i].meta for inputs in submodule_inputs
+            ):
+                raise ValueError(
+                    f"Expected entry with key {idx + i} in input_qparams meta, got {input_qparams}"
+                )
+        return input_qparams_map
 
     def _get_output_qparams_map(self, node: Node):
         output_qparams_map: dict[int, QuantArgs] = {}
@@ -635,7 +642,7 @@ class InsertControlFlowRescalesPass(ArmPass):
         modified = False
         if_graph: GraphModule = cast(GraphModule, graph_module.get_submodule(node.args[1].target))  # type: ignore
         else_graph: GraphModule = cast(GraphModule, graph_module.get_submodule(node.args[2].target))  # type: ignore
-        input_qparams_map = self._get_input_qparams_map(node, 3)
+        input_qparams_map = self._get_input_qparams_map(node, 3, if_graph, else_graph)
         if input_qparams_map:
             modified |= self._rescale_submodule_inputs(if_graph, input_qparams_map)
             modified |= self._rescale_submodule_inputs(else_graph, input_qparams_map)
@@ -651,12 +658,14 @@ class InsertControlFlowRescalesPass(ArmPass):
         cond_graph: GraphModule = cast(GraphModule, graph_module.get_submodule(node.args[0].target))  # type: ignore
         body_graph: GraphModule = cast(GraphModule, graph_module.get_submodule(node.args[1].target))  # type: ignore
 
-        input_qparams_map = self._get_input_qparams_map(node, 2)
+        input_qparams_map = self._get_input_qparams_map(node, 2, cond_graph, body_graph)
         if input_qparams_map:
             modified |= self._rescale_submodule_inputs(cond_graph, input_qparams_map)
             modified |= self._rescale_submodule_inputs(body_graph, input_qparams_map)
 
-        output_qparams_map = self._get_output_qparams_map(node)
+        # Body outputs re-enter the loop, so those not used after it, such as
+        # passed-through additional inputs, are rescaled to their input qparams.
+        output_qparams_map = input_qparams_map | self._get_output_qparams_map(node)
         if output_qparams_map:
             modified |= self._rescale_submodule_outputs(body_graph, output_qparams_map)
         return modified

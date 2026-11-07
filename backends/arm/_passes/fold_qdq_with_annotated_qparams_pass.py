@@ -6,7 +6,7 @@
 
 import copy
 
-from typing import cast, ClassVar, Optional, Set, Type
+from typing import cast, ClassVar, Optional, Sequence, Set, Type
 
 import torch
 from executorch.backends.arm._passes import ArmPass
@@ -208,16 +208,15 @@ class FoldAndAnnotateQParamsPass(ArmPass):
         if not remove_qdq:
             return
 
+        special = _get_special_dtype(input_qparams)
         for dq in nodes_to_remove:
             if dq.target not in DQ_OPS:
                 raise RuntimeError(f"Expected one of {DQ_OPS} dq_op, got {dq.target}")
             node.replace_input_with(dq, cast(Node, dq.args[0]))
+            if special:
+                cast(Node, dq.args[0]).meta[TosaSpecialDtype.meta_key()] = special
             if not dq.users:
                 graph_module.graph.erase_node(dq)
-
-        special = _get_special_dtype(input_qparams)
-        if special:
-            node.all_input_nodes[index].meta[TosaSpecialDtype.meta_key()] = special
 
     def fold_and_annotate_arg(
         self, graph_module: GraphModule, node: Node, arg_list: list[Node], i: int
@@ -338,6 +337,21 @@ class FoldAndAnnotateQParamsPass(ArmPass):
         return
 
     @staticmethod
+    def _get_input_args(node: Node) -> tuple[object, ...]:
+        """Return the args of ``node``, with the operand lists of control-flow
+        ops flattened since each operand can be quantized differently.
+        """
+        match node.target:
+            case torch.ops.higher_order.cond:
+                return (*node.args[:3], *cast(Sequence[object], node.args[3]))
+            case torch.ops.higher_order.while_loop:
+                # NormalizeWhileInitialArgsPass has moved the additional inputs
+                # into the carried inputs.
+                return (*node.args[:2], *cast(Sequence[object], node.args[2]))
+            case _:
+                return node.args
+
+    @staticmethod
     def is_foldable(node: Node) -> bool:
         if node.op != "call_function":
             return False
@@ -407,7 +421,7 @@ class FoldAndAnnotateQParamsPass(ArmPass):
             input_qparams: dict[int, QuantArgs] = {}
             input_nodes_to_remove: dict[int, set[Node]] = {}
             input_nodes_seen: set[Node] = set()
-            for i, arg in enumerate(n.args):
+            for i, arg in enumerate(self._get_input_args(n)):
                 qparams, nodes_to_remove = self._extract_arg_input_params(arg)
                 if qparams is not None:
                     input_qparams[i] = qparams

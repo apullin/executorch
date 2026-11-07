@@ -31,6 +31,7 @@ from torchao.quantization.pt2e.quantizer import (
     DerivedQuantizationSpec,
     QuantizationAnnotation,
     QuantizationSpec,
+    QuantizationSpecBase,
     Quantizer,
     SharedQuantizationSpec,
 )
@@ -705,12 +706,40 @@ class SharedQspecQuantizer(Quantizer, QuantizerReporterUser):
             return True
 
         input_qspec = adjacent_qspecs[0]
-        input_qspec_map: dict[Node, Optional[QuantizationSpec]] = {
+        input_qspec_map: dict[Node, Optional[QuantizationSpecBase]] = {
             n: input_qspec for n in self._get_input_nodes_with_float_output(root_node)
         }
-        output_qspec: Optional[QuantizationSpec] = None
+        output_qspec: Optional[QuantizationSpecBase] = None
         if len(self._get_user_nodes_with_float_input(root_node)) > 0:
             output_qspec = input_qspec
+
+        # A body output either re-enters the loop as a carried input or exits it,
+        # so carried inputs and loop outputs share qparams. The loop-invariant
+        # additional inputs are quantized independently, with the global input
+        # qspec since the adjacent one can be shared, e.g. with the outputs of an
+        # earlier loop.
+        loop_inputs = cast(list[Node], root_node.args[2])
+        num_carried = len(loop_inputs) - len(root_node.meta["additional_inputs"])
+        carried_inputs = [n for n in input_qspec_map if n in loop_inputs[:num_carried]]
+        additional_qspec = input_qspec
+        if self.global_config is not None:
+            additional_qspec = self.global_config.get_input_act_qspec() or input_qspec
+        for n in input_qspec_map:
+            if n not in carried_inputs:
+                input_qspec_map[n] = additional_qspec
+        loop_outputs: list[Node] = []
+        if carried_inputs:
+            shared_qspec = SharedQuantizationSpec((carried_inputs[0], root_node))
+            for n in carried_inputs[1:]:
+                input_qspec_map[n] = shared_qspec
+            output_qspec = shared_qspec
+            loop_outputs = [
+                n
+                for n in root_node.users
+                if has_float_output(n) and not self._is_annotated(n)
+            ]
+            for n in loop_outputs:
+                _mark_node_as_quantized(n, {}, shared_qspec, is_quantized=True)
 
         _mark_node_as_quantized(
             root_node,
@@ -718,7 +747,7 @@ class SharedQspecQuantizer(Quantizer, QuantizerReporterUser):
             output_qspec,
             is_quantized=True,
         )
-        self.report_accept([root_node])
+        self.report_accept([root_node, *loop_outputs])
         return True
 
     def _annotate_shared_cluster(self, root_node: Node) -> None:

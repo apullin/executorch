@@ -16,9 +16,10 @@ from executorch.exir.pass_base import ExportPass, PassResult
 class EnsureUniqueOutputNodesPass(ArmPass):
     """Ensure each graph output leaf references a unique producer node.
 
-    If the same node appears multiple times in the output structure, insert a
-    ``tosa.IDENTITY`` node for each occurrence and replace the repeated output
-    entries with those identity nodes.
+    If the same node appears multiple times in the output structure, or a
+    control-flow submodule input is returned as is, insert a ``tosa.IDENTITY``
+    node for each occurrence and replace those output entries with the identity
+    nodes.
 
     """
 
@@ -42,16 +43,21 @@ class EnsureUniqueOutputNodesPass(ArmPass):
 
         counts: Counter[torch.fx.Node] = Counter()
         self._collect_output_nodes(output_value, counts)
-        repeated_nodes = {node for node, count in counts.items() if count > 1}
-        if not repeated_nodes:
+        nodes_to_replace = {
+            node
+            for node, count in counts.items()
+            if count > 1
+            or (node.op == "placeholder" and node.meta.get("is_input", False))
+        }
+        if not nodes_to_replace:
             return PassResult(graph_module, False)
 
         modified = False
 
-        def _replace_repeated_outputs(value: Any) -> Any:
+        def _replace_outputs(value: Any) -> Any:
             nonlocal modified
             if isinstance(value, torch.fx.Node):
-                if value not in repeated_nodes:
+                if value not in nodes_to_replace:
                     return value
                 with graph.inserting_before(output_node):
                     identity_node = create_node(
@@ -64,14 +70,14 @@ class EnsureUniqueOutputNodesPass(ArmPass):
                 return identity_node
 
             if isinstance(value, tuple):
-                return tuple(_replace_repeated_outputs(v) for v in value)
+                return tuple(_replace_outputs(v) for v in value)
 
             if isinstance(value, list):
-                return [_replace_repeated_outputs(v) for v in value]
+                return [_replace_outputs(v) for v in value]
 
             return value
 
-        new_output_value = _replace_repeated_outputs(output_value)
+        new_output_value = _replace_outputs(output_value)
         if modified:
             output_node.args = (new_output_value,)
             graph.eliminate_dead_code()

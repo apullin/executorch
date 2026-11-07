@@ -8,6 +8,7 @@ from executorch.backends.arm._passes import EnsureUniqueOutputNodesPass
 from executorch.backends.arm.test.tester.test_pipeline import PassPipeline
 from executorch.backends.test.harness.stages import StageType
 from executorch.exir.dialects._ops import ops as exir_ops
+from torch._subclasses.fake_tensor import FakeTensorMode
 
 
 class DuplicateOutputModule(torch.nn.Module):
@@ -62,3 +63,26 @@ def test_ensure_unique_output_nodes_no_target_keeps_unique_outputs_unchanged() -
         ],
     )
     pipeline.run()
+
+
+def test_ensure_unique_output_nodes_no_target_inserts_identity_for_returned_submodule_input() -> (
+    None
+):
+    graph = torch.fx.Graph()
+    submodule_input = graph.placeholder("submodule_input")
+    constant = graph.placeholder("constant")
+    with FakeTensorMode():
+        submodule_input.meta["val"] = torch.empty(2, 2)
+        constant.meta["val"] = torch.empty(2, 2)
+    submodule_input.meta["is_input"] = True
+    graph.output((submodule_input, constant))
+
+    result = EnsureUniqueOutputNodesPass()(
+        torch.fx.GraphModule(torch.nn.Module(), graph)
+    )
+
+    assert result is not None
+    identity, unchanged = result.graph_module.graph.output_node().args[0]
+    assert identity.target == exir_ops.backend.tosa.IDENTITY.default
+    assert identity.args[0].name == "submodule_input"
+    assert unchanged.name == "constant"
