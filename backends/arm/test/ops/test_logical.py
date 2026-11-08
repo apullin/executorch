@@ -1,4 +1,4 @@
-# Copyright 2025 Arm Limited and/or its affiliates.
+# Copyright 2025-2026 Arm Limited and/or its affiliates.
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
@@ -37,6 +37,14 @@ class LogicalBinary(torch.nn.Module):
         ),
         "rand_rank4": lambda: (
             torch.randint(0, 2, (1, 10, 10, 10), dtype=torch.bool),
+            torch.randint(0, 2, (1, 10, 10, 10), dtype=torch.bool),
+        ),
+        "rand_rank3_rank1": lambda: (
+            torch.randint(0, 2, (10, 10, 10), dtype=torch.bool),
+            torch.randint(0, 2, (10,), dtype=torch.bool),
+        ),
+        "rand_rank2_rank4": lambda: (
+            torch.randint(0, 2, (10, 1), dtype=torch.bool),
             torch.randint(0, 2, (1, 10, 10, 10), dtype=torch.bool),
         ),
     }

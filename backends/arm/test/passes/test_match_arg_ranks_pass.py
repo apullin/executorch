@@ -51,6 +51,40 @@ def test_match_arg_ranks_handles_tosa_binary_ops() -> None:
     assert add.all_input_nodes[1] is view
 
 
+@pytest.mark.parametrize(
+    "target",
+    (
+        exir_ops.edge.aten.logical_and.default,
+        exir_ops.edge.aten.logical_or.default,
+        exir_ops.edge.aten.logical_xor.default,
+    ),
+)
+def test_match_arg_ranks_handles_logical_ops(target) -> None:
+    fake_mode = FakeTensorMode()
+    graph = torch.fx.Graph()
+    x = graph.placeholder("x")
+    x.meta["val"] = fake_mode.from_tensor(torch.empty((1, 4, 6), dtype=torch.bool))
+    y = graph.placeholder("y")
+    y.meta["val"] = fake_mode.from_tensor(torch.empty((6,), dtype=torch.bool))
+    logical = graph.call_function(target, args=(x, y))
+    logical.meta["val"] = fake_mode.from_tensor(
+        torch.empty((1, 4, 6), dtype=torch.bool)
+    )
+    graph.output(logical)
+    graph_module = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+    with TosaLoweringContext(TosaSpecification.create_from_string("TOSA-1.0+FP")):
+        result = MatchArgRanksPass(cast(ExportedProgram, None)).call(graph_module)
+    logical = result.graph_module.graph.find_nodes(op="call_function", target=target)[0]
+    view = logical.args[1]
+
+    assert result.modified
+    assert logical.args[0].target == "x"
+    assert view.target == exir_ops.edge.aten.view_copy.default
+    assert view.args[0].target == "y"
+    assert view.args[1] == [1, 1, 6]
+
+
 @pytest.mark.parametrize("share_shift_with_data", (False, True))
 def test_match_arg_ranks_preserves_mul_shift(share_shift_with_data):
     graph = torch.fx.Graph()
