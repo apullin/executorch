@@ -751,6 +751,12 @@ class RemovePermutesAroundElementwiseOps(ExportPass):
                 return True
         return False
 
+    # Ops that never broadcast their operands against each other. Subclasses
+    # add backend ops with the same property.
+    _NON_BROADCASTING_OPS: tuple[EdgeOpOverload, ...] = (
+        exir_ops.edge.aten.cat.default,
+    )
+
     def permute_subgraph(self, subgraph: Subgraph) -> bool:  # noqa: C901
         # Ensure that the subgraph's edges have not been modified by an earlier rewrite before applying changes.
         if not self._subgraph_edges_are_current(subgraph):
@@ -802,14 +808,14 @@ class RemovePermutesAroundElementwiseOps(ExportPass):
         # fits its input. Same-rank broadcasting is safe: every operand carries
         # the region's permutation, and broadcasting commutes with applying one
         # permutation to all operands. numel-1 operands broadcast identically
-        # under any permutation, and cat never broadcasts. Constant operands
-        # are exempt: they are reshaped or permuted into the region's layout
-        # below.
+        # under any permutation, and _NON_BROADCASTING_OPS such as cat never
+        # broadcast. Constant operands are exempt: they are reshaped or
+        # permuted into the region's layout below.
         for node in subgraph.nodes:
             if (
                 node in interleave_nodes
                 or node.target in self._VIEW_OPS
-                or node.target == exir_ops.edge.aten.cat.default
+                or node.target in self._NON_BROADCASTING_OPS
             ):
                 continue
             operand_ranks = {
