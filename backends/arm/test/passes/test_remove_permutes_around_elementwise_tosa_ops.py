@@ -24,10 +24,12 @@ TOSA_INT_SPEC = TosaSpecification.create_from_string("TOSA-1.0+INT")
 TOSA_FP_SPEC = TosaSpecification.create_from_string("TOSA-1.0+FP")
 PERMUTE_TARGET = exir_ops.edge.aten.permute_copy.default
 RESCALE_TARGET = exir_ops.backend.tosa.RESCALE.default
+TABLE_TARGET = exir_ops.backend.tosa.TABLE.default
 MUL_TARGET = exir_ops.edge.aten.mul.Tensor
 ADD_TARGET = exir_ops.edge.aten.add.Tensor
 SUB_TARGET = exir_ops.edge.aten.sub.Tensor
 VIEW_TARGET = exir_ops.edge.aten.view_copy.default
+SUM_TARGET = exir_ops.edge.aten.sum.dim_IntList
 ERF_TARGET = exir_ops.edge.aten.erf.default
 
 
@@ -293,6 +295,111 @@ def test_remove_permutes_around_amax_reduction_region_tosa_INT() -> None:
     assert maximum.args[1] == 1
     actual = result.graph_module(*inputs)
     torch.testing.assert_close(actual, expected)
+
+
+def test_remove_permutes_around_rms_norm_with_table_tosa_INT() -> None:
+    """The rank-1 lookup table of the TABLE computing the rsqrt is not a
+    broadcast operand, so it must not keep the permutes around the norm.
+    """
+    graph = torch.fx.Graph()
+    x = graph.placeholder("x")
+    x.meta["val"] = torch.empty(1, 3, 4, 8, dtype=torch.int8)
+    table = graph.placeholder("b_rsqrt_table_constant")
+    table.meta["val"] = torch.empty(256, dtype=torch.int8)
+
+    permute_in = graph.create_node(
+        "call_function", PERMUTE_TARGET, args=(x, [0, 3, 1, 2])
+    )
+    permute_in.meta["val"] = torch.empty(1, 8, 3, 4, dtype=torch.int8)
+    x_int32 = graph.create_node(
+        "call_function", RESCALE_TARGET, args=(permute_in, torch.int32, [1.0], 0, 0)
+    )
+    x_int32.meta["val"] = torch.empty(1, 8, 3, 4, dtype=torch.int32)
+    square = graph.create_node("call_function", MUL_TARGET, args=(x_int32, x_int32))
+    square.meta["val"] = torch.empty(1, 8, 3, 4, dtype=torch.int32)
+    sum_of_squares = graph.create_node(
+        "call_function",
+        SUM_TARGET,
+        args=(square, [1], True),
+        kwargs={"dtype": torch.int32},
+    )
+    sum_of_squares.meta["val"] = torch.empty(1, 1, 3, 4, dtype=torch.int32)
+    table_input = graph.create_node(
+        "call_function",
+        RESCALE_TARGET,
+        args=(sum_of_squares, torch.int8, [0.01], 0, 0),
+    )
+    table_input.meta["val"] = torch.empty(1, 1, 3, 4, dtype=torch.int8)
+    rsqrt = graph.create_node("call_function", TABLE_TARGET, args=(table_input, table))
+    rsqrt.meta["val"] = torch.empty(1, 1, 3, 4, dtype=torch.int8)
+    rsqrt_int32 = graph.create_node(
+        "call_function", RESCALE_TARGET, args=(rsqrt, torch.int32, [1.0], 0, 0)
+    )
+    rsqrt_int32.meta["val"] = torch.empty(1, 1, 3, 4, dtype=torch.int32)
+    normed = graph.create_node("call_function", MUL_TARGET, args=(x_int32, rsqrt_int32))
+    normed.meta["val"] = torch.empty(1, 8, 3, 4, dtype=torch.int32)
+    normed_int8 = graph.create_node(
+        "call_function", RESCALE_TARGET, args=(normed, torch.int8, [0.01], 0, 0)
+    )
+    normed_int8.meta["val"] = torch.empty(1, 8, 3, 4, dtype=torch.int8)
+    permute_out = graph.create_node(
+        "call_function", PERMUTE_TARGET, args=(normed_int8, [0, 2, 3, 1])
+    )
+    permute_out.meta["val"] = torch.empty(1, 3, 4, 8, dtype=torch.int8)
+    graph.output(permute_out)
+
+    graph_module = torch.fx.GraphModule({}, graph)
+    with TosaLoweringContext(TOSA_INT_SPEC):
+        result = RemovePermutesAroundElementwiseTosaOps(_fake_exported_program()).call(
+            graph_module
+        )
+
+    assert result.modified
+    assert _count_nodes(result.graph_module, PERMUTE_TARGET) == 0
+    assert _count_nodes(result.graph_module, VIEW_TARGET) == 0
+    assert sum_of_squares.args[1] == [3]
+    assert rsqrt.args == (table_input, table)
+
+
+def test_remove_permutes_around_table_with_constant_input_tosa_INT() -> None:
+    """Only the lookup table of a TABLE keeps its layout; a constant data
+    operand is permuted into the region's layout like any other constant.
+    """
+    graph = torch.fx.Graph()
+    x = graph.placeholder("x")
+    x.meta["val"] = torch.empty(1, 3, 4, 8, dtype=torch.int8)
+    state = graph.placeholder("b_state")
+    state.meta["val"] = torch.empty(1, 8, 3, 4, dtype=torch.int8)
+    table = graph.placeholder("b_sigmoid_table_constant")
+    table.meta["val"] = torch.empty(256, dtype=torch.int8)
+
+    permute_in = graph.create_node(
+        "call_function", PERMUTE_TARGET, args=(x, [0, 3, 1, 2])
+    )
+    permute_in.meta["val"] = torch.empty(1, 8, 3, 4, dtype=torch.int8)
+    gate = graph.create_node("call_function", TABLE_TARGET, args=(state, table))
+    gate.meta["val"] = torch.empty(1, 8, 3, 4, dtype=torch.int8)
+    gated = graph.create_node("call_function", MUL_TARGET, args=(permute_in, gate))
+    gated.meta["val"] = torch.empty(1, 8, 3, 4, dtype=torch.int8)
+    permute_out = graph.create_node(
+        "call_function", PERMUTE_TARGET, args=(gated, [0, 2, 3, 1])
+    )
+    permute_out.meta["val"] = torch.empty(1, 3, 4, 8, dtype=torch.int8)
+    graph.output(permute_out)
+
+    graph_module = torch.fx.GraphModule({}, graph)
+    with TosaLoweringContext(TOSA_INT_SPEC):
+        result = RemovePermutesAroundElementwiseTosaOps(_fake_exported_program()).call(
+            graph_module
+        )
+
+    assert result.modified
+    assert _count_nodes(result.graph_module, PERMUTE_TARGET) == 1
+    state_permute = gate.args[0]
+    assert isinstance(state_permute, torch.fx.Node)
+    assert state_permute.target == PERMUTE_TARGET
+    assert state_permute.args == (state, [0, 2, 3, 1])
+    assert gate.args[1] is table
 
 
 def test_remove_permutes_around_gelu_with_folded_scalar_constants_tosa_FP() -> None:
