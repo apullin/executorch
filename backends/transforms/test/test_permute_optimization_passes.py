@@ -1328,6 +1328,57 @@ class RemovePermutesAcrossViewTest(unittest.TestCase):
             count_node(result.graph_module, exir_ops.edge.aten.permute_copy.default), 2
         )
 
+    def test_no_fire_branches_disagreeing_on_permutation(self) -> None:
+        """permute → hardtanh → (view(squeeze) → clamp → view(unsqueeze)) + hardtanh
+        → permute. The branch through the views drops and re-inserts the
+        permuted unit axis, so the add reads its two operands under different
+        permutations. The pass must keep the permutes: removing them makes
+        the add broadcast [1, H, W, 1] against [1, 1, H, W]."""
+        for x_shape in ((1, 4, 4, 1), (1, 3, 4, 1)):
+            builder = GraphBuilder()
+            x_data = torch.randn(*x_shape)
+            x = builder.placeholder("x", x_data)
+            p1 = builder.call_operator(
+                op=exir_ops.edge.aten.permute_copy.default, args=(x, [0, 3, 1, 2])
+            )
+            h1 = builder.call_operator(
+                op=exir_ops.edge.aten.hardtanh.default, args=(p1,)
+            )
+            _, height, width, _ = x_shape
+            v1 = builder.call_operator(
+                op=exir_ops.edge.aten.view_copy.default, args=(h1, [1, height, width])
+            )
+            c1 = builder.call_operator(
+                op=exir_ops.edge.aten.clamp.default, args=(v1, -0.5, 0.5)
+            )
+            v2 = builder.call_operator(
+                op=exir_ops.edge.aten.view_copy.default,
+                args=(c1, [1, 1, height, width]),
+            )
+            add = builder.call_operator(op=exir_ops.edge.aten.add.Tensor, args=(h1, v2))
+            p2 = builder.call_operator(
+                op=exir_ops.edge.aten.permute_copy.default, args=(add, [0, 2, 3, 1])
+            )
+            builder.output([p2])
+            original = builder.get_graph_module()
+            gm_before = copy.deepcopy(original)
+
+            result = cast(PassResult, RemovePermutesAroundElementwiseOps()(original))
+
+            self.assertFalse(result.modified, x_shape)
+            self.assertEqual(
+                count_node(
+                    result.graph_module, exir_ops.edge.aten.permute_copy.default
+                ),
+                2,
+            )
+            validate_numerics(
+                gm_before,
+                result.graph_module,
+                [x_data],
+                "RemovePermutesAroundElementwiseOps",
+            )
+
     def test_permute_unsqueeze_copy_mul_squeeze_copy_permute(self) -> None:
         """permute(3D) → unsqueeze_copy(dim=2) → mul(4D) → squeeze_copy(dim=2) → permute(3D).
         Canonicalisation rewrites both shape ops to view_copy, which
