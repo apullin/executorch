@@ -499,7 +499,14 @@ class RemovePermutesAroundElementwiseOps(ExportPass):
             current_start_permute = subgraph.start_permute
 
         if node in subgraph.nodes:
-            return True
+            # A node reached again through another branch must see the same
+            # permutation. Branches can disagree, for example where one drops
+            # and re-inserts the permuted unit axis through squeeze and
+            # unsqueeze views; removing the permutes would then broadcast the
+            # node's operands against each other in different layouts.
+            return list(subgraph.node_start_permute[node]) == list(
+                current_start_permute
+            )
         if node in processed_nodes:
             return False
         # Explicit unsqueeze nodes are not generally permutable after shape-op
