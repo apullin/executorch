@@ -805,19 +805,22 @@ class RemovePermutesAroundElementwiseOps(ExportPass):
                     if len(perm) != len(inp.meta["val"].shape):
                         return False
 
-        # Validate: no node in the region may broadcast operands of different
-        # rank. Broadcasting right-aligns shapes, so once the boundary permutes
-        # are removed a lower-rank operand lines up against different axes of
-        # the others and the region silently computes a differently shaped
-        # result -- a [216, 1] that met a [1, 1, 216, 1] now meets a
-        # [1, 216, 1, 1] and yields 216 * 216 elements. The mismatch only
-        # surfaces later, as a downstream view whose recorded shape no longer
-        # fits its input. Same-rank broadcasting is safe: every operand carries
-        # the region's permutation, and broadcasting commutes with applying one
-        # permutation to all operands. numel-1 operands broadcast identically
-        # under any permutation, and _NON_BROADCASTING_OPS such as cat never
-        # broadcast. Constant operands are exempt: they are reshaped or
-        # permuted into the region's layout below.
+        # Validate: no node in the region may broadcast an operand of lower
+        # rank than the region's permutation. Broadcasting right-aligns shapes,
+        # so once the boundary permutes are removed a lower-rank operand lines
+        # up against different axes and the region silently computes a
+        # differently shaped result -- a [216, 1] that met a [1, 1, 216, 1] now
+        # meets a [1, 216, 1, 1] and yields 216 * 216 elements. The mismatch
+        # only surfaces later, as a downstream view whose recorded shape no
+        # longer fits its input. Comparing the operands with the permutation,
+        # not with each other, also catches a lower-rank operand whose only
+        # full-rank partner holds one element. Operands of the permutation's
+        # rank are safe: every one carries the region's permutation, and
+        # broadcasting commutes with applying one permutation to all operands.
+        # numel-1 operands broadcast identically under any permutation, and
+        # _NON_BROADCASTING_OPS such as cat never broadcast. Constant operands
+        # are exempt: they are reshaped or permuted into the region's layout
+        # below.
         for node in subgraph.nodes:
             if (
                 node in interleave_nodes
@@ -835,7 +838,10 @@ class RemovePermutesAroundElementwiseOps(ExportPass):
                 )
                 if shape is not None and math.prod(shape) > 1
             }
-            if len(operand_ranks) > 1:
+            region_rank = len(
+                subgraph.node_start_permute.get(node, subgraph.start_permute)
+            )
+            if any(rank != region_rank for rank in operand_ranks):
                 return False
 
         # Handle dimension related node arguments FIRST, before
