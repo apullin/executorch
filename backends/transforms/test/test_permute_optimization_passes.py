@@ -1260,6 +1260,49 @@ class RemovePermutesAcrossViewTest(unittest.TestCase):
             "permute_aten_pad_permute",
         )
 
+    def test_no_fire_lower_rank_operand_beside_numel_one_operand(self) -> None:
+        """add(hardtanh(permute(a)), view(permute(y))) where a is [1, 1, 1, 1]
+        and the view squeezes the permuted [1, 1, 3, 4] to [3, 4]. The [3, 4]
+        is the only operand with more than one element, and broadcasting
+        right-aligns it, so it does not carry the region's permutation; the
+        pass must keep the permutes rather than turn the [1, 3, 4, 1] result
+        into a [1, 1, 3, 4] one."""
+        builder = GraphBuilder()
+        a_data = torch.randn(1, 1, 1, 1)
+        y_data = torch.randn(1, 3, 4, 1)
+        a = builder.placeholder("a", a_data)
+        y = builder.placeholder("y", y_data)
+        pa = builder.call_operator(
+            op=exir_ops.edge.aten.permute_copy.default, args=(a, [0, 3, 1, 2])
+        )
+        ha = builder.call_operator(op=exir_ops.edge.aten.hardtanh.default, args=(pa,))
+        py = builder.call_operator(
+            op=exir_ops.edge.aten.permute_copy.default, args=(y, [0, 3, 1, 2])
+        )
+        sq = builder.call_operator(
+            op=exir_ops.edge.aten.view_copy.default, args=(py, [3, 4])
+        )
+        add = builder.call_operator(op=exir_ops.edge.aten.add.Tensor, args=(ha, sq))
+        p_out = builder.call_operator(
+            op=exir_ops.edge.aten.permute_copy.default, args=(add, [0, 2, 3, 1])
+        )
+        builder.output([p_out])
+        original = builder.get_graph_module()
+        gm_before = copy.deepcopy(original)
+
+        result = cast(PassResult, RemovePermutesAroundElementwiseOps()(original))
+
+        self.assertFalse(result.modified)
+        self.assertEqual(
+            count_node(result.graph_module, exir_ops.edge.aten.permute_copy.default), 3
+        )
+        validate_numerics(
+            gm_before,
+            result.graph_module,
+            [a_data, y_data],
+            "RemovePermutesAroundElementwiseOps",
+        )
+
     def test_permute_squeeze_clamp_add_permute(self) -> None:
         """4D permute → squeeze(view) → hardtanh → add(with self) → 3D permute.
         Tests clamp + add interacting across a squeeze boundary."""
